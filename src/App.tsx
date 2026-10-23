@@ -33,6 +33,23 @@ interface PresetBundle {
   render: Record<string, unknown>;
 }
 
+/** mode -> how the cloth is held; the Physics sliders start from these */
+const MODE_VALUES: Record<string, Record<string, unknown>> = {
+  Flag: {
+    hang: 'Flag',
+    pinSpread: 1,
+    gravity: 4.5,
+    // less gel than the poster, or the ripple dies before it travels
+    viscosity: 0.25,
+    wind: 22,
+    // mostly streaming away from the pole, so the face stays on camera
+    windDir: 83,
+    flutter: 1.2,
+    gust: 0.6,
+  },
+  Poster: { hang: 'Two pins', pinSpread: 0.94, gravity: 9.8, wind: 0, viscosity: 0.6 },
+};
+
 const PRESET_VALUES: Record<string, PresetBundle> = {
   Holo: {
     material: {
@@ -307,6 +324,11 @@ export default function App() {
         options: ['High', 'Medium', 'Low'],
         default: 'High',
       },
+      mode: {
+        type: 'select' as const,
+        options: ['Flag', 'Poster'],
+        default: 'Flag',
+      },
       material: {
         preset: {
           type: 'select' as const,
@@ -353,7 +375,7 @@ export default function App() {
       },
       physics: {
         _collapsed: true,
-        viscosity: [0.6, 0.0, 0.6, 0.005],
+        viscosity: [0.25, 0.0, 0.6, 0.005],
         stiffness: [1, 0.2, 1, 0.01],
         iterations: [14, 1, 14, 1],
         smoothing: [0.14, 0, 0.3, 0.005],
@@ -361,11 +383,11 @@ export default function App() {
         hang: {
           type: 'select' as const,
           options: ['Free', 'Two pins', 'Top edge', 'Flag'],
-          default: 'Two pins',
+          default: 'Flag',
         },
-        pinSpread: [0.94, 0.6, 1, 0.005],
-        gravity: [9.8, 0, 40, 0.1],
-        wind: [0, 0, 60, 0.5],
+        pinSpread: [1, 0.6, 1, 0.005],
+        gravity: [4.5, 0, 40, 0.1],
+        wind: [22, 0, 60, 0.5],
         windDir: [83, -180, 180, 1],
         flutter: [1.2, 0, 3, 0.01],
         gust: [0.6, 0, 1, 0.01],
@@ -409,8 +431,6 @@ export default function App() {
       exportPNGClear: { type: 'action' as const, label: 'Export PNG (no background)' },
       resetCloth: { type: 'action' as const, label: 'Reset cloth' },
       poke: { type: 'action' as const, label: 'Poke' },
-      hangPoster: { type: 'action' as const, label: 'Hang as poster' },
-      flyFlag: { type: 'action' as const, label: 'Fly as flag' },
     },
     {
       id: 'holocloth',
@@ -421,25 +441,6 @@ export default function App() {
         if (name === 'shuffle') {
           dial.setValues({
             grid: { pattern: 'Generated', seed: 1 + Math.floor(Math.random() * 999) },
-          } as never);
-        } else if (name === 'hangPoster') {
-          dial.setValues({
-            physics: { hang: 'Two pins', pinSpread: 0.94, gravity: 9.8, wind: 0, viscosity: 0.6 },
-          } as never);
-        } else if (name === 'flyFlag') {
-          dial.setValues({
-            physics: {
-              hang: 'Flag',
-              pinSpread: 1,
-              gravity: 4.5,
-              // less gel than the poster, or the ripple dies before it travels
-              viscosity: 0.25,
-              wind: 22,
-              // mostly streaming away from the pole, so the face stays on camera
-              windDir: 75,
-              flutter: 1.2,
-              gust: 0.6,
-            },
           } as never);
         } else if (name === 'resetCloth') app.resetCloth();
         else if (name === 'poke') app.poke();
@@ -596,6 +597,20 @@ export default function App() {
   const skipFinish = useRef(true);
 
   // preset picks a whole material bundle
+  // mode picks how the cloth is held: it writes that hang's physics, which
+  // the sliders can then fine-tune
+  const mode = params.mode;
+  const skipMode = useRef(true);
+  useEffect(() => {
+    if (skipMode.current) {
+      skipMode.current = false;
+      return;
+    }
+    const bundle = MODE_VALUES[mode];
+    if (bundle) dial.setValues({ physics: bundle } as never);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
   const preset = params.material.preset;
   const skipPreset = useRef(true);
   useEffect(() => {
