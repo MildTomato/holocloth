@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.1.1",
     "dialkit": "^1.4.2",
     "motion": "^12.0.0",
     "react": "^19.2.0",

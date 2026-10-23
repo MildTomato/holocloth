@@ -25,10 +25,31 @@ export interface ClothPhysicsParams {
    * with the odd lull where the wind drops, the sheet sags, then it picks up.
    */
   dynamicWind?: boolean;
+  /**
+   * 0..1 — how strongly the cloth resists bending. 1 holds a crisp flag or
+   * poster; near 0 drapes like fabric over a face.
+   */
+  bend?: number;
+  /**
+   * 0..1 — how hard the cloth resists being squashed. 1 treats squashing like
+   * stretching, which holds a taut flag; near 0 lets it gather into soft
+   * wrinkles the way fabric does when it drapes over something.
+   */
+  compress?: number;
+  /** keep the cloth from passing through itself where it folds */
+  selfCollide?: boolean;
 }
 
-/** How the sheet is held up: floating free, pinned at the top, or on a hoist. */
-export type HangMode = 'Free' | 'Two pins' | 'Top edge' | 'Flag';
+/**
+ * How the sheet is held up: floating free, pinned at the top, on a hoist, or
+ * lying face-down over something (gravity into the screen, onto a collider).
+ */
+export type HangMode = 'Free' | 'Two pins' | 'Top edge' | 'Flag' | 'Face';
+
+/** Something for the cloth to lie on: a height above the bed (world z) under each point. */
+export interface Collider {
+  heightAt(x: number, y: number): number;
+}
 
 interface GrabState {
   indices: number[];
@@ -40,6 +61,18 @@ interface GrabState {
 
 const SUBSTEP = 1 / 120;
 const MAX_SUBSTEPS = 4;
+/**
+ * Face mode: the sheet starts lying flat on the bed and the face rises into
+ * it from below. Dropping it from a height instead lands the edges first,
+ * which pins slack into upright pleats.
+ */
+const FACE_DROP = 0;
+/** a hair of gap between the sheet and what it lies on, so it never z-fights */
+const CLOTH_THICKNESS = 0.02;
+/** self-collision buckets (power of two) */
+const HASH_SIZE = 4096;
+/** 0..1 — how much a touching point's sliding is held back each substep; low, so slack can slump */
+const FRICTION = 0.12;
 
 /**
  * Verlet cloth. With gravity at 0 and nothing pinned there are no external
@@ -60,6 +93,8 @@ export class ClothSim {
   private cB: Int32Array;
   private cRest: Float32Array;
   private cMul: Float32Array;
+  /** 1 where a constraint is a bend (two apart), scaled by params.bend */
+  private cBend: Uint8Array;
 
   /** 4-neighborhood for laplacian smoothing: -1 padded */
   private neighbors: Int32Array;
@@ -98,22 +133,24 @@ export class ClothSim {
     const a: number[] = [];
     const b: number[] = [];
     const mul: number[] = [];
+    const bend: number[] = [];
     const idx = (x: number, y: number) => y * this.cols + x;
     for (let y = 0; y < this.rows; y++) {
       for (let x = 0; x < this.cols; x++) {
-        if (x + 1 < this.cols) { a.push(idx(x, y)); b.push(idx(x + 1, y)); mul.push(1.0); }
-        if (y + 1 < this.rows) { a.push(idx(x, y)); b.push(idx(x, y + 1)); mul.push(1.0); }
+        if (x + 1 < this.cols) { a.push(idx(x, y)); b.push(idx(x + 1, y)); mul.push(1.0); bend.push(0); }
+        if (y + 1 < this.rows) { a.push(idx(x, y)); b.push(idx(x, y + 1)); mul.push(1.0); bend.push(0); }
         if (x + 1 < this.cols && y + 1 < this.rows) {
-          a.push(idx(x, y)); b.push(idx(x + 1, y + 1)); mul.push(0.85);
-          a.push(idx(x + 1, y)); b.push(idx(x, y + 1)); mul.push(0.85);
+          a.push(idx(x, y)); b.push(idx(x + 1, y + 1)); mul.push(0.85); bend.push(0);
+          a.push(idx(x + 1, y)); b.push(idx(x, y + 1)); mul.push(0.85); bend.push(0);
         }
-        if (x + 2 < this.cols) { a.push(idx(x, y)); b.push(idx(x + 2, y)); mul.push(0.35); }
-        if (y + 2 < this.rows) { a.push(idx(x, y)); b.push(idx(x, y + 2)); mul.push(0.35); }
+        if (x + 2 < this.cols) { a.push(idx(x, y)); b.push(idx(x + 2, y)); mul.push(0.35); bend.push(1); }
+        if (y + 2 < this.rows) { a.push(idx(x, y)); b.push(idx(x, y + 2)); mul.push(0.35); bend.push(1); }
       }
     }
     this.cA = new Int32Array(a);
     this.cB = new Int32Array(b);
     this.cMul = new Float32Array(mul);
+    this.cBend = new Uint8Array(bend);
     this.cRest = new Float32Array(a.length);
     this.computeRestLengths();
 
@@ -173,6 +210,8 @@ export class ClothSim {
    * folds instead of holding it perfectly flat.
    */
   private flatPose() {
+    // face-down, the sheet starts above whatever it will fall onto
+    const lift = this.hang === 'Face' ? FACE_DROP : 0;
     const stepX = this.width / this.segX;
     const stepY = this.height / this.segY;
     let k = 0;
@@ -180,7 +219,7 @@ export class ClothSim {
       for (let x = 0; x < this.cols; x++) {
         this.positions[k] = -this.width / 2 + x * stepX;
         this.positions[k + 1] = this.height / 2 - y * stepY;
-        this.positions[k + 2] = (Math.random() - 0.5) * stepX * 0.05;
+        this.positions[k + 2] = lift + (Math.random() - 0.5) * stepX * 0.05;
         k += 3;
       }
     }
@@ -198,12 +237,18 @@ export class ClothSim {
     } else if (this.hang === 'Flag') {
       // the hoist: the whole left edge rides the pole
       for (let y = 0; y < this.rows; y++) idxs.push(y * this.cols);
+    } else if (this.hang === 'Face') {
+      // tucked in: the whole border held flat on the bed, so the face pushes
+      // up into the sheet instead of lifting its edges into pleats
+      for (let x = 0; x < this.cols; x++) idxs.push(x, (this.rows - 1) * this.cols + x);
+      for (let y = 1; y < this.rows - 1; y++) idxs.push(y * this.cols, y * this.cols + this.cols - 1);
     }
     this.pins = idxs;
     this.pinPos = new Float32Array(idxs.length * 3);
-    // spread < 1 draws the pins in along the hang line, slackening it
+    // spread < 1 draws the pins in along the hang line, slackening it (both
+    // ways when the sheet is tucked in all round)
     const sx = this.hang === 'Flag' ? 1 : this.pinSpread;
-    const sy = this.hang === 'Flag' ? this.pinSpread : 1;
+    const sy = this.hang === 'Flag' || this.hang === 'Face' ? this.pinSpread : 1;
     for (let k = 0; k < idxs.length; k++) {
       const gx = idxs[k] % this.cols;
       const gy = Math.floor(idxs[k] / this.cols);
@@ -421,11 +466,13 @@ export class ClothSim {
 
     this.updateWeather(params);
 
-    // gravity as a Verlet acceleration term, on the Y component of each vertex
+    // gravity as a Verlet acceleration term: down (-Y), or into the screen
+    // (-Z) when the sheet is lying face-down
     const g = (params.gravity ?? 0) * this.wx.gravity;
     if (g !== 0) {
       const dv = -g * SUBSTEP * SUBSTEP;
-      for (let i = 1; i < n * 3; i += 3) p[i] += dv;
+      const axis = this.hang === 'Face' ? 2 : 1;
+      for (let i = axis; i < n * 3; i += 3) p[i] += dv;
     }
 
     this.time += SUBSTEP;
@@ -454,7 +501,9 @@ export class ClothSim {
     // constraint relaxation
     const iters = Math.max(1, Math.round(params.iterations));
     const stiff = params.stiffness;
-    const cA = this.cA, cB = this.cB, cRest = this.cRest, cMul = this.cMul;
+    const cA = this.cA, cB = this.cB, cRest = this.cRest, cMul = this.cMul, cBend = this.cBend;
+    const bendScale = params.bend ?? 1;
+    const compressScale = params.compress ?? 1;
     const nc = cA.length;
     for (let it = 0; it < iters; it++) {
       for (let c = 0; c < nc; c++) {
@@ -464,13 +513,115 @@ export class ClothSim {
         const dz = p[ib + 2] - p[ia + 2];
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (d < 1e-9) continue;
-        const diff = ((d - cRest[c]) / d) * 0.5 * stiff * cMul[c];
+        let m = cBend[c] ? cMul[c] * bendScale : cMul[c];
+        if (d < cRest[c]) m *= compressScale;
+        const diff = ((d - cRest[c]) / d) * 0.5 * stiff * m;
         const ox = dx * diff, oy = dy * diff, oz = dz * diff;
         p[ia] += ox; p[ia + 1] += oy; p[ia + 2] += oz;
         p[ib] -= ox; p[ib + 1] -= oy; p[ib + 2] -= oz;
       }
       this.applyGrab();
       this.applyPins();
+      this.applyCollider(false);
+    }
+    if (params.selfCollide) {
+      this.applySelfCollision();
+      this.applyPins();
+    }
+    this.applyCollider(true);
+  }
+
+  // self-collision spatial hash, reused every substep
+  private hashStarts = new Int32Array(HASH_SIZE + 1);
+  private hashEntries: Int32Array | null = null;
+  private hashOf: Int32Array | null = null;
+
+  /**
+   * Every point is a small ball as thick as the mesh spacing; two that touch
+   * but aren't near each other in the weave get pushed apart, so folds stack
+   * instead of passing through. A spatial hash keeps it to nearby pairs.
+   */
+  private applySelfCollision() {
+    const n = this.count;
+    const p = this.positions;
+    const cols = this.cols;
+    const spacing = Math.min(this.width / this.segX, this.height / this.segY);
+    const minDist = spacing;
+    const min2 = minDist * minDist;
+    const inv = 1 / minDist;
+    if (!this.hashEntries || this.hashEntries.length < n) {
+      this.hashEntries = new Int32Array(n);
+      this.hashOf = new Int32Array(n);
+    }
+    const starts = this.hashStarts;
+    const entries = this.hashEntries;
+    const hashOf = this.hashOf!;
+    const cell = (x: number) => Math.floor(x * inv);
+    const hash = (ix: number, iy: number, iz: number) =>
+      ((ix * 73856093) ^ (iy * 19349663) ^ (iz * 83492791)) & (HASH_SIZE - 1);
+
+    // counting sort of points into buckets
+    starts.fill(0);
+    for (let i = 0; i < n; i++) {
+      const h = hash(cell(p[i * 3]), cell(p[i * 3 + 1]), cell(p[i * 3 + 2]));
+      hashOf[i] = h;
+      starts[h + 1]++;
+    }
+    for (let h = 0; h < HASH_SIZE; h++) starts[h + 1] += starts[h];
+    const fill = starts.slice(0, HASH_SIZE);
+    for (let i = 0; i < n; i++) entries[fill[hashOf[i]]++] = i;
+
+    for (let i = 0; i < n; i++) {
+      const ix = cell(p[i * 3]), iy = cell(p[i * 3 + 1]), iz = cell(p[i * 3 + 2]);
+      const ri = Math.floor(i / cols), ci = i % cols;
+      for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const h = hash(ix + dx, iy + dy, iz + dz);
+        for (let e = starts[h]; e < starts[h + 1]; e++) {
+          const j = entries[e];
+          if (j <= i) continue;
+          // neighbours in the weave are meant to be this close
+          const rj = Math.floor(j / cols), cj = j % cols;
+          if (Math.abs(ri - rj) <= 2 && Math.abs(ci - cj) <= 2) continue;
+          const ddx = p[j * 3] - p[i * 3];
+          const ddy = p[j * 3 + 1] - p[i * 3 + 1];
+          const ddz = p[j * 3 + 2] - p[i * 3 + 2];
+          const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+          if (d2 >= min2 || d2 < 1e-12) continue;
+          const d = Math.sqrt(d2);
+          const push = ((minDist - d) / d) * 0.5;
+          p[i * 3] -= ddx * push; p[i * 3 + 1] -= ddy * push; p[i * 3 + 2] -= ddz * push;
+          p[j * 3] += ddx * push; p[j * 3 + 1] += ddy * push; p[j * 3 + 2] += ddz * push;
+        }
+      }
+    }
+  }
+
+  private collider: Collider | null = null;
+
+  setCollider(c: Collider | null) {
+    this.collider = c;
+  }
+
+  /**
+   * Keep the sheet on top of the collider. Points that sink below the surface
+   * are lifted onto it; with friction, touching points also lose some of
+   * their sliding, so the sheet settles over a face instead of sliding off.
+   */
+  private applyCollider(friction: boolean) {
+    const c = this.collider;
+    if (!c) return;
+    const p = this.positions;
+    const prev = this.prev;
+    for (let i = 0; i < this.count; i++) {
+      const k = i * 3;
+      const surface = c.heightAt(p[k], p[k + 1]) + CLOTH_THICKNESS;
+      if (p[k + 2] > surface) continue;
+      p[k + 2] = surface;
+      if (prev[k + 2] < surface) prev[k + 2] = surface;
+      if (friction) {
+        prev[k] += (p[k] - prev[k]) * FRICTION;
+        prev[k + 1] += (p[k + 1] - prev[k + 1]) * FRICTION;
+      }
     }
   }
 

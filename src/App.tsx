@@ -61,10 +61,36 @@ const MODE_VALUES: Record<string, Record<string, unknown>> = {
     windDir: 83,
     flutter: 1.2,
     gust: 0.6,
+    smoothing: 0.14,
+    bend: 1,
+    compress: 1,
+    selfCollide: false,
   },
-  Poster: { hang: 'Two pins', pinSpread: 0.94, gravity: 9.8, wind: 0, viscosity: 0.6 },
+  Poster: {
+    hang: 'Two pins', pinSpread: 0.94, gravity: 9.8, wind: 0, viscosity: 0.6, smoothing: 0.14, bend: 1, compress: 1,
+    selfCollide: false,
+  },
   // the cloth as it came: zero gravity, floating on its hand-arranged drape
-  Original: { hang: 'Free', pinSpread: 1, gravity: 0, wind: 0, viscosity: 0.6 },
+  Original: {
+    hang: 'Free', pinSpread: 1, gravity: 0, wind: 0, viscosity: 0.6, smoothing: 0.14, bend: 1, compress: 1,
+    selfCollide: false,
+  },
+  // your face, from the webcam, pushing up into a sheet tucked in all round.
+  // A little slack (pin spread), no smoothing, soft bend and little
+  // resistance to squashing, so it settles onto the face like fabric
+  Face: {
+    hang: 'Face', pinSpread: 0.9, gravity: 9.8, wind: 0, viscosity: 0.12, smoothing: 0, bend: 0.3, compress: 0.25,
+    selfCollide: true,
+  },
+};
+
+/** what to tell people while face tracking gets going (tracking itself needs no notice) */
+const FACE_NOTICE: Record<string, string> = {
+  starting: 'Asking for the camera…',
+  loading: 'Loading face tracking…',
+  searching: 'Looking for a face…',
+  blocked: 'Camera blocked — allow camera access to use Face',
+  error: 'Face tracking failed to load',
 };
 
 const PRESET_VALUES: Record<string, PresetBundle> = {
@@ -343,7 +369,7 @@ export default function App() {
       },
       mode: {
         type: 'select' as const,
-        options: ['Flag', 'Poster', 'Original'],
+        options: ['Flag', 'Poster', 'Original', 'Face'],
         default: 'Flag',
       },
       material: {
@@ -399,7 +425,7 @@ export default function App() {
         grabRadius: [0.27, 0.05, 1.2, 0.01],
         hang: {
           type: 'select' as const,
-          options: ['Free', 'Two pins', 'Top edge', 'Flag'],
+          options: ['Free', 'Two pins', 'Top edge', 'Flag', 'Face'],
           default: 'Flag',
         },
         pinSpread: [1, 0.6, 1, 0.005],
@@ -409,6 +435,9 @@ export default function App() {
         flutter: [1.2, 0, 3, 0.01],
         gust: [0.6, 0, 1, 0.01],
         dynamicWind: true,
+        bend: [1, 0, 1, 0.01],
+        compress: [1, 0, 1, 0.01],
+        selfCollide: false,
       },
       images: {
         _collapsed: true,
@@ -479,6 +508,7 @@ export default function App() {
   const params = dial.values;
 
   const [, setImagesRev] = useState(0);
+  const [faceStatus, setFaceStatus] = useState<string | null>(null);
   // the sticker currently in the hand, following the pointer
   const [ghost, setGhost] = useState<StickerGhost | null>(null);
 
@@ -536,6 +566,7 @@ export default function App() {
     };
     app.onImagesChanged = () => setImagesRev((v) => v + 1);
     app.onStickerPick = (item, e) => carrySticker(item.img, e, item.rotation, true);
+    app.onFaceStatus = setFaceStatus;
     // startup assets: cloth poster + bump map, with combined download
     // progress driving the loader; the cloth stays hidden until both land
     const assets = [
@@ -801,6 +832,9 @@ export default function App() {
           />,
           bumpAnchor,
         )}
+      {!CLEAN && faceStatus && FACE_NOTICE[faceStatus] && (
+        <div style={FACE_NOTICE_STYLE}>{FACE_NOTICE[faceStatus]}</div>
+      )}
       {!CLEAN && <DialRoot position="top-right" defaultOpen productionEnabled />}
       {!loaderGone && <Loader percent={loadPercent} hiding={assetsReady} />}
     </>
@@ -869,4 +903,19 @@ const GHOST_HINT_STYLE: React.CSSProperties = {
   font: '500 11px/1 system-ui, sans-serif',
   pointerEvents: 'none',
   zIndex: 21,
+};
+
+const FACE_NOTICE_STYLE: React.CSSProperties = {
+  position: 'fixed',
+  left: '50%',
+  bottom: 24,
+  transform: 'translateX(-50%)',
+  padding: '8px 12px',
+  borderRadius: 8,
+  background: 'rgba(22, 22, 26, 0.86)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  color: 'rgba(255, 255, 255, 0.75)',
+  font: '500 12px/1 system-ui, sans-serif',
+  pointerEvents: 'none',
+  zIndex: 15,
 };

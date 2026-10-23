@@ -13,6 +13,8 @@ import { normalMapFromImage } from './textures.ts';
 import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
 import { gridSvg, growthSvg, loadImage, fetchDataUrl } from './gridArt.ts';
+import { FaceTracker, type FaceStatus } from './faceTracker.ts';
+import { FaceCollider } from './faceCollider.ts';
 
 /** Per-version snapshot of everything image-related (session-scoped). */
 export interface ImagesState {
@@ -36,6 +38,9 @@ export interface HoloParams {
     flutter: number;
     gust: number;
     dynamicWind: boolean;
+    bend: number;
+    compress: number;
+    selfCollide: boolean;
   };
   material: {
     preset: string;
@@ -193,6 +198,11 @@ export class HoloApp {
   onImagesChanged: (() => void) | null = null;
   /** App-level hook: a sticker was peeled off the cloth; the app carries it from here. */
   onStickerPick: ((item: DecalItem, e: PointerEvent) => void) | null = null;
+  /** App-level hook: face tracking state, for the on-screen notice */
+  onFaceStatus: ((status: FaceStatus | null) => void) | null = null;
+  /** webcam tracking while the cloth lies over your face (Face mode) */
+  private faceTracker: FaceTracker | null = null;
+  private faceCollider = new FaceCollider();
   /** stickers mid slap-down, animating their pop back to 1 */
   private slaps: { item: DecalItem; t0: number }[] = [];
   /** last grid settings applied; a change regenerates the cloth art */
@@ -318,6 +328,7 @@ export class HoloApp {
       this.sim.setPinSpread(this.params.physics.pinSpread);
       this.sim.setHang(this.params.physics.hang as HangMode);
     }
+    if (this.faceTracker) this.sim.setCollider(this.faceCollider);
     const geo = new THREE.PlaneGeometry(w, h, segX, segY);
     const posAttr = new THREE.BufferAttribute(this.sim.positions, 3);
     posAttr.setUsage(THREE.DynamicDrawUsage);
@@ -355,6 +366,7 @@ export class HoloApp {
     // spread first: setHang pins at the current spread
     this.sim.setPinSpread(p.physics.pinSpread);
     this.sim.setHang(p.physics.hang as HangMode);
+    this.setFaceTracking(p.physics.hang === 'Face');
     if (p.performance !== this.perfProfile) this.applyPerfProfile(p.performance);
     const m = this.holoMaterial;
     m.color.set(p.material.baseColor);
@@ -459,6 +471,27 @@ export class HoloApp {
         seed: Math.round(g.seed),
       }, field);
     return loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+  }
+
+  /**
+   * Face mode: the webcam drives a collider the sheet lies on. Off again
+   * releases the camera straight away.
+   */
+  private setFaceTracking(on: boolean) {
+    if (on === !!this.faceTracker) return;
+    if (on) {
+      const tracker = new FaceTracker();
+      tracker.onStatus = (s) => this.onFaceStatus?.(s);
+      this.faceTracker = tracker;
+      this.sim.setCollider(this.faceCollider);
+      void tracker.start();
+    } else {
+      this.faceTracker?.stop();
+      this.faceTracker = null;
+      this.faceCollider.clear();
+      this.sim.setCollider(null);
+      this.onFaceStatus?.(null);
+    }
   }
 
   /** Run the sim ahead without rendering, so a still opens on a flag already in the wind. */
@@ -940,6 +973,8 @@ export class HoloApp {
     }
 
     if (this.params) {
+      const face = this.faceTracker?.poll();
+      if (face) this.faceCollider.update(face);
       this.sim.step(dt, this.params.physics);
       this.clothGeometry.attributes.position.needsUpdate = true;
       this.clothGeometry.computeVertexNormals();
@@ -988,6 +1023,7 @@ export class HoloApp {
 
   dispose() {
     this.disposed = true;
+    this.faceTracker?.stop();
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
     const canvas = this.renderer.domElement;
