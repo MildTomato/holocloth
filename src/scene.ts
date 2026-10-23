@@ -13,7 +13,9 @@ import { normalMapFromImage } from './textures.ts';
 import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
 import { gridSvg, growthSvg, loadImage, fetchDataUrl } from './gridArt.ts';
-import { FaceTracker, type FaceStatus } from './faceTracker.ts';
+import { FaceTracker } from './faceTracker.ts';
+import { HandTracker, type HandsFrame } from './handTracker.ts';
+import type { TrackerStatus } from './cameraTracker.ts';
 import { FaceCollider } from './faceCollider.ts';
 
 /** Per-version snapshot of everything image-related (session-scoped). */
@@ -24,6 +26,8 @@ export interface ImagesState {
 
 export interface HoloParams {
   performance: string;
+  /** webcam hands hold the poster's corners */
+  hands: boolean;
   physics: {
     viscosity: number;
     stiffness: number;
@@ -41,6 +45,8 @@ export interface HoloParams {
     bend: number;
     compress: number;
     selfCollide: boolean;
+    stretch: number;
+    faceDepth: number;
   };
   material: {
     preset: string;
@@ -105,6 +111,15 @@ const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
 };
 
 const CLOTH_LONG_SIDE = 3;
+// Hands: the camera frame maps onto this world width, centred this high
+const HOLD_SPAN = 3.2;
+const HOLD_CENTER_Y = 1.0;
+/** hand size (wrist to middle knuckle, share of frame height) when far / near */
+const HAND_FAR = 0.12;
+const HAND_NEAR = 0.32;
+/** how far the held corner sits from the wall, far hand to near hand */
+const HOLD_Z_FAR = -0.6;
+const HOLD_Z_NEAR = 0.9;
 /** sticker width as a fraction of cloth width */
 const STICKER_SCALE = 0.26;
 const CLOTH_SEGMENTS = 48;
@@ -199,7 +214,14 @@ export class HoloApp {
   /** App-level hook: a sticker was peeled off the cloth; the app carries it from here. */
   onStickerPick: ((item: DecalItem, e: PointerEvent) => void) | null = null;
   /** App-level hook: face tracking state, for the on-screen notice */
-  onFaceStatus: ((status: FaceStatus | null) => void) | null = null;
+  onFaceStatus: ((status: TrackerStatus | null) => void) | null = null;
+  /** App-level hook: hand tracking state, for the on-screen notice */
+  onHandStatus: ((status: TrackerStatus | null) => void) | null = null;
+  /** webcam hands holding the poster's corners (Hands on) */
+  private handTracker: HandTracker | null = null;
+  private latestHands: HandsFrame | null = null;
+  /** each top corner's held position, eased toward the hand (or back to the wall) */
+  private grips: ({ x: number; y: number; z: number } | null)[] = [null, null];
   /** webcam tracking while the cloth lies over your face (Face mode) */
   private faceTracker: FaceTracker | null = null;
   private faceCollider = new FaceCollider();
@@ -367,6 +389,8 @@ export class HoloApp {
     this.sim.setPinSpread(p.physics.pinSpread);
     this.sim.setHang(p.physics.hang as HangMode);
     this.setFaceTracking(p.physics.hang === 'Face');
+    this.setHandTracking(!!p.hands);
+    this.faceCollider.depth = p.physics.faceDepth;
     if (p.performance !== this.perfProfile) this.applyPerfProfile(p.performance);
     const m = this.holoMaterial;
     m.color.set(p.material.baseColor);
@@ -491,6 +515,66 @@ export class HoloApp {
       this.faceCollider.clear();
       this.sim.setCollider(null);
       this.onFaceStatus?.(null);
+    }
+  }
+
+  /** Hands on: the webcam's hands hold the poster's top corners. */
+  private setHandTracking(on: boolean) {
+    if (on === !!this.handTracker) return;
+    if (on) {
+      const tracker = new HandTracker();
+      tracker.onStatus = (s) => this.onHandStatus?.(s);
+      this.handTracker = tracker;
+      this.latestHands = null;
+      void tracker.start();
+    } else {
+      this.handTracker?.stop();
+      this.handTracker = null;
+      this.latestHands = null;
+      this.grips = [null, null];
+      for (let k = 0; k < this.sim.pinCount; k++) this.sim.holdPin(k, null);
+      this.onHandStatus?.(null);
+    }
+  }
+
+  /**
+   * Each hand holds the top corner on its side, at its thumb-index pinch.
+   * Mirrored like the preview; how big the hand looks stands in for how
+   * close it is, bringing that corner toward you. A corner whose hand is
+   * gone eases back onto its wall pin.
+   */
+  private holdWithHands() {
+    const tracker = this.handTracker!;
+    const fresh = tracker.poll();
+    if (fresh || tracker.lastStatus === 'searching') this.latestHands = fresh;
+    if (this.sim.pinCount !== 2) return; // hands hold the poster's two corners
+
+    const aspect = tracker.frameAspect;
+    const targets: ({ x: number; y: number; z: number } | null)[] = [null, null];
+    const held = (this.latestHands?.hands ?? []).map((h) => {
+      const t = THREE.MathUtils.clamp((h.size - HAND_FAR) / (HAND_NEAR - HAND_FAR), 0, 1);
+      return {
+        x: -(h.grip.x - 0.5) * HOLD_SPAN,
+        y: HOLD_CENTER_Y + (0.5 - h.grip.y) * (HOLD_SPAN / aspect),
+        z: THREE.MathUtils.lerp(HOLD_Z_FAR, HOLD_Z_NEAR, t),
+      };
+    });
+    if (held.length >= 2) {
+      held.sort((a, b) => a.x - b.x);
+      targets[0] = held[0];
+      targets[1] = held[held.length - 1];
+    } else if (held.length === 1) {
+      targets[held[0].x < 0 ? 0 : 1] = held[0];
+    }
+
+    for (let k = 0; k < 2; k++) {
+      const goal = targets[k] ?? this.sim.pinRestOf(k);
+      const g = (this.grips[k] ??= { ...this.sim.pinRestOf(k) });
+      const ease = targets[k] ? 0.35 : 0.06;
+      g.x += (goal.x - g.x) * ease;
+      g.y += (goal.y - g.y) * ease;
+      g.z += (goal.z - g.z) * ease;
+      this.sim.holdPin(k, g);
     }
   }
 
@@ -975,6 +1059,7 @@ export class HoloApp {
     if (this.params) {
       const face = this.faceTracker?.poll();
       if (face) this.faceCollider.update(face);
+      if (this.handTracker) this.holdWithHands();
       this.sim.step(dt, this.params.physics);
       this.clothGeometry.attributes.position.needsUpdate = true;
       this.clothGeometry.computeVertexNormals();
@@ -1024,6 +1109,7 @@ export class HoloApp {
   dispose() {
     this.disposed = true;
     this.faceTracker?.stop();
+    this.handTracker?.stop();
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
     const canvas = this.renderer.domElement;

@@ -64,23 +64,25 @@ const MODE_VALUES: Record<string, Record<string, unknown>> = {
     smoothing: 0.14,
     bend: 1,
     compress: 1,
+    stretch: 1,
+    iterations: 14,
     selfCollide: false,
   },
   Poster: {
     hang: 'Two pins', pinSpread: 0.94, gravity: 9.8, wind: 0, viscosity: 0.6, smoothing: 0.14, bend: 1, compress: 1,
-    selfCollide: false,
+    stretch: 1, iterations: 14, selfCollide: false,
   },
   // the cloth as it came: zero gravity, floating on its hand-arranged drape
   Original: {
     hang: 'Free', pinSpread: 1, gravity: 0, wind: 0, viscosity: 0.6, smoothing: 0.14, bend: 1, compress: 1,
-    selfCollide: false,
+    stretch: 1, iterations: 14, selfCollide: false,
   },
-  // your face, from the webcam, pushing up into a sheet tucked in all round.
-  // A little slack (pin spread), no smoothing, soft bend and little
-  // resistance to squashing, so it settles onto the face like fabric
+  // a sheet lying over your face, from the webcam, edges free. Some give
+  // (stretch) so its weight settles it onto the features rather than
+  // bridging them; no smoothing, soft bend, little resistance to squashing
   Face: {
-    hang: 'Face', pinSpread: 0.9, gravity: 9.8, wind: 0, viscosity: 0.12, smoothing: 0, bend: 0.3, compress: 0.25,
-    selfCollide: true,
+    hang: 'Face', pinSpread: 1, gravity: 12, wind: 0, viscosity: 0.12, smoothing: 0, bend: 0.15, compress: 0.25,
+    stretch: 0.2, iterations: 8, selfCollide: true,
   },
 };
 
@@ -91,6 +93,14 @@ const FACE_NOTICE: Record<string, string> = {
   searching: 'Looking for a face…',
   blocked: 'Camera blocked — allow camera access to use Face',
   error: 'Face tracking failed to load',
+};
+
+const HAND_NOTICE: Record<string, string> = {
+  starting: 'Asking for the camera…',
+  loading: 'Loading hand tracking…',
+  searching: 'Hold up your hands to take the poster',
+  blocked: 'Camera blocked — allow camera access to use Hands',
+  error: 'Hand tracking failed to load',
 };
 
 const PRESET_VALUES: Record<string, PresetBundle> = {
@@ -372,6 +382,7 @@ export default function App() {
         options: ['Flag', 'Poster', 'Original', 'Face'],
         default: 'Flag',
       },
+      hands: false,
       material: {
         preset: {
           type: 'select' as const,
@@ -438,6 +449,8 @@ export default function App() {
         bend: [1, 0, 1, 0.01],
         compress: [1, 0, 1, 0.01],
         selfCollide: false,
+        stretch: [1, 0, 1, 0.01],
+        faceDepth: [0.5, 0, 1.5, 0.01],
       },
       images: {
         _collapsed: true,
@@ -509,6 +522,7 @@ export default function App() {
 
   const [, setImagesRev] = useState(0);
   const [faceStatus, setFaceStatus] = useState<string | null>(null);
+  const [handStatus, setHandStatus] = useState<string | null>(null);
   // the sticker currently in the hand, following the pointer
   const [ghost, setGhost] = useState<StickerGhost | null>(null);
 
@@ -567,6 +581,7 @@ export default function App() {
     app.onImagesChanged = () => setImagesRev((v) => v + 1);
     app.onStickerPick = (item, e) => carrySticker(item.img, e, item.rotation, true);
     app.onFaceStatus = setFaceStatus;
+    app.onHandStatus = setHandStatus;
     // startup assets: cloth poster + bump map, with combined download
     // progress driving the loader; the cloth stays hidden until both land
     const assets = [
@@ -658,6 +673,18 @@ export default function App() {
       // private mode / storage off: it just won't be remembered
     }
   }, [performance]);
+
+  // switching Hands on hands you the poster: the hands hold its corners
+  const hands = params.hands;
+  const skipHands = useRef(true);
+  useEffect(() => {
+    if (skipHands.current) {
+      skipHands.current = false;
+      return;
+    }
+    if (hands) dial.setValues({ mode: 'Poster' } as never);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hands]);
 
   // mode picks how the cloth is held: it writes that hang's physics, which
   // the sliders can then fine-tune
@@ -834,6 +861,11 @@ export default function App() {
         )}
       {!CLEAN && faceStatus && FACE_NOTICE[faceStatus] && (
         <div style={FACE_NOTICE_STYLE}>{FACE_NOTICE[faceStatus]}</div>
+      )}
+      {!CLEAN && handStatus && (
+        <div style={FACE_NOTICE_STYLE}>
+          {params.mode !== 'Poster' ? 'Hands hold the poster — set Mode to Poster' : HAND_NOTICE[handStatus]}
+        </div>
       )}
       {!CLEAN && <DialRoot position="top-right" defaultOpen productionEnabled />}
       {!loaderGone && <Loader percent={loadPercent} hiding={assetsReady} />}

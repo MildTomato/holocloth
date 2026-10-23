@@ -20,16 +20,16 @@ const GRID_Y1 = 1.8;
 const NX = 104;
 const NY = 144;
 
-/** face width (cheek to cheek) on the sheet — small next to it, like a sheet over a person */
-const FACE_W = 0.75;
+/** face width (cheek to cheek) on the sheet — big, so the features span enough of the mesh to read */
+const FACE_W = 1.0;
 /** where the face sits on the sheet: just above centre, with cloth to spare all round */
 const FACE_Y = 0.15;
-/** how high the head shell rises off the bed: low, so the face's own features carry the shape */
-const HEAD_H = 0.2;
+/** how high the head shell rises off the bed */
+const HEAD_H = 0.22;
 /** head outline relative to the face's half-width / half-height */
 const HEAD_PAD = 1.3;
 /** each landmark fills a disc this wide, so the gaps between them close */
-const SPLAT_R = 0.05;
+const SPLAT_R = 0.07;
 /** blur passes: enough that the head's sides slope, so the sheet slides off them */
 const BLUR_PASSES = 4;
 /** share of the previous frame kept, to steady landmark jitter */
@@ -51,6 +51,8 @@ export class FaceCollider {
   private tmp = new Float32Array(NX * NY);
   private hasFace = false;
   private rise = 0;
+  /** 0..1.5 — how far the face rises into the sheet; scales head and features together */
+  depth = 0.5;
 
   /** Height of the bed + head under (x, y); 0 is the bed. */
   heightAt(x: number, y: number): number {
@@ -131,7 +133,7 @@ export class FaceCollider {
     // soften the splats into a surface, then ease toward it from last frame
     for (let b = 0; b < BLUR_PASSES; b++) this.blur(out);
     this.rise = Math.min(1, this.rise + 1 / RISE_FRAMES);
-    const lift = this.rise * this.rise * (3 - 2 * this.rise); // smoothstep
+    const lift = this.rise * this.rise * (3 - 2 * this.rise) * this.depth; // smoothstep
     const keep = this.hasFace ? SMOOTHING : 0;
     for (let c = 0; c < out.length; c++) this.h[c] = this.h[c] * keep + out[c] * lift * (1 - keep);
     this.hasFace = true;

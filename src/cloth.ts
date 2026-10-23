@@ -38,6 +38,12 @@ export interface ClothPhysicsParams {
   compress?: number;
   /** keep the cloth from passing through itself where it folds */
   selfCollide?: boolean;
+  /**
+   * 0..1 — how hard the cloth resists stretching. 1 is the crisp,
+   * inextensible flag; low gives it the give of thin fabric, so its weight
+   * pulls it into the hollows of whatever it lies on instead of bridging them.
+   */
+  stretch?: number;
 }
 
 /**
@@ -61,11 +67,7 @@ interface GrabState {
 
 const SUBSTEP = 1 / 120;
 const MAX_SUBSTEPS = 4;
-/**
- * Face mode: the sheet starts lying flat on the bed and the face rises into
- * it from below. Dropping it from a height instead lands the edges first,
- * which pins slack into upright pleats.
- */
+/** Face mode: the sheet starts flat on the bed and the face rises into it */
 const FACE_DROP = 0;
 /** a hair of gap between the sheet and what it lies on, so it never z-fights */
 const CLOTH_THICKNESS = 0.02;
@@ -105,6 +107,8 @@ export class ClothSim {
   /** pinned vertex indices, and the world positions they are held at */
   private pins: number[] = [];
   private pinPos = new Float32Array(0);
+  /** where each pin sits when nothing is holding it */
+  private pinRest = new Float32Array(0);
   private hang: HangMode = 'Free';
   private pinSpread = 1;
   /** sim clock, drives the wind */
@@ -237,18 +241,12 @@ export class ClothSim {
     } else if (this.hang === 'Flag') {
       // the hoist: the whole left edge rides the pole
       for (let y = 0; y < this.rows; y++) idxs.push(y * this.cols);
-    } else if (this.hang === 'Face') {
-      // tucked in: the whole border held flat on the bed, so the face pushes
-      // up into the sheet instead of lifting its edges into pleats
-      for (let x = 0; x < this.cols; x++) idxs.push(x, (this.rows - 1) * this.cols + x);
-      for (let y = 1; y < this.rows - 1; y++) idxs.push(y * this.cols, y * this.cols + this.cols - 1);
     }
     this.pins = idxs;
     this.pinPos = new Float32Array(idxs.length * 3);
-    // spread < 1 draws the pins in along the hang line, slackening it (both
-    // ways when the sheet is tucked in all round)
+    // spread < 1 draws the pins in along the hang line, slackening it
     const sx = this.hang === 'Flag' ? 1 : this.pinSpread;
-    const sy = this.hang === 'Flag' || this.hang === 'Face' ? this.pinSpread : 1;
+    const sy = this.hang === 'Flag' ? this.pinSpread : 1;
     for (let k = 0; k < idxs.length; k++) {
       const gx = idxs[k] % this.cols;
       const gy = Math.floor(idxs[k] / this.cols);
@@ -256,6 +254,25 @@ export class ClothSim {
       this.pinPos[k * 3 + 1] = (0.5 - gy / this.segY) * this.height * sy;
       this.pinPos[k * 3 + 2] = 0;
     }
+    this.pinRest = this.pinPos.slice();
+  }
+
+  get pinCount() {
+    return this.pins.length;
+  }
+
+  /** Where pin k sits when nothing is holding it. */
+  pinRestOf(k: number) {
+    return { x: this.pinRest[k * 3], y: this.pinRest[k * 3 + 1], z: this.pinRest[k * 3 + 2] };
+  }
+
+  /** Hold pin k at a point (e.g. a hand), or put it back on its rest anchor. */
+  holdPin(k: number, p: { x: number; y: number; z: number } | null) {
+    if (k >= this.pins.length) return;
+    const src = p ?? this.pinRestOf(k);
+    this.pinPos[k * 3] = src.x;
+    this.pinPos[k * 3 + 1] = src.y;
+    this.pinPos[k * 3 + 2] = src.z;
   }
 
   /** 0 at the held edge, 1 at the free end — the sheet loosens as it goes. */
@@ -504,6 +521,7 @@ export class ClothSim {
     const cA = this.cA, cB = this.cB, cRest = this.cRest, cMul = this.cMul, cBend = this.cBend;
     const bendScale = params.bend ?? 1;
     const compressScale = params.compress ?? 1;
+    const stretchScale = params.stretch ?? 1;
     const nc = cA.length;
     for (let it = 0; it < iters; it++) {
       for (let c = 0; c < nc; c++) {
@@ -514,7 +532,7 @@ export class ClothSim {
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (d < 1e-9) continue;
         let m = cBend[c] ? cMul[c] * bendScale : cMul[c];
-        if (d < cRest[c]) m *= compressScale;
+        m *= d < cRest[c] ? compressScale : stretchScale;
         const diff = ((d - cRest[c]) / d) * 0.5 * stiff * m;
         const ox = dx * diff, oy = dy * diff, oz = dz * diff;
         p[ia] += ox; p[ia + 1] += oy; p[ia + 2] += oz;
