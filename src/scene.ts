@@ -312,6 +312,12 @@ export class HoloApp {
     const segX = aspect >= 1 ? segs : Math.max(10, Math.round(segs * aspect));
     const segY = aspect >= 1 ? Math.max(10, Math.round(segs / aspect)) : segs;
     this.sim = new ClothSim(w, h, segX, segY);
+    // a fresh sim starts free-floating: hold it the way the panel says, or a
+    // rebuild (performance switch, new image shape) drops the flag/poster
+    if (this.params) {
+      this.sim.setPinSpread(this.params.physics.pinSpread);
+      this.sim.setHang(this.params.physics.hang as HangMode);
+    }
     const geo = new THREE.PlaneGeometry(w, h, segX, segY);
     const posAttr = new THREE.BufferAttribute(this.sim.positions, 3);
     posAttr.setUsage(THREE.DynamicDrawUsage);

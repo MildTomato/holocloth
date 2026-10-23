@@ -4,6 +4,18 @@ import { useDialKitController, DialRoot, DialStore } from 'dialkit';
 import { HoloApp, type HoloParams, type ImagesState } from './scene.ts';
 import { STICKER_SHEET } from './stickers.ts';
 
+const PERFORMANCE_KEY = 'holocloth.performance';
+
+/** The performance profile picked on a previous visit, if any. */
+function savedPerformance(): string {
+  try {
+    const v = localStorage.getItem(PERFORMANCE_KEY);
+    return v === 'High' || v === 'Medium' || v === 'Low' ? v : 'High';
+  } catch {
+    return 'High';
+  }
+}
+
 /** Shared renderer settings — identical across every preset. */
 const RENDER_DEFAULTS = {
   background: '#0b0c12',
@@ -322,7 +334,7 @@ export default function App() {
       performance: {
         type: 'select' as const,
         options: ['High', 'Medium', 'Low'],
-        default: 'High',
+        default: savedPerformance(),
       },
       mode: {
         type: 'select' as const,
@@ -597,6 +609,16 @@ export default function App() {
   const skipFinish = useRef(true);
 
   // preset picks a whole material bundle
+  // localStorage is outside React: keep the saved profile in step with the panel
+  const performance = params.performance;
+  useEffect(() => {
+    try {
+      localStorage.setItem(PERFORMANCE_KEY, performance);
+    } catch {
+      // private mode / storage off: it just won't be remembered
+    }
+  }, [performance]);
+
   // mode picks how the cloth is held: it writes that hang's physics, which
   // the sliders can then fine-tune
   const mode = params.mode;
