@@ -6,6 +6,9 @@ import { STICKER_SHEET } from './stickers.ts';
 
 const PERFORMANCE_KEY = 'holocloth.performance';
 
+/** ?clean renders the cloth alone — no panel, no sticker sheet — for stills like the OG image */
+const CLEAN = new URLSearchParams(window.location.search).has('clean');
+
 /** The performance profile picked on a previous visit, if any. */
 function savedPerformance(): string {
   try {
@@ -60,6 +63,8 @@ const MODE_VALUES: Record<string, Record<string, unknown>> = {
     gust: 0.6,
   },
   Poster: { hang: 'Two pins', pinSpread: 0.94, gravity: 9.8, wind: 0, viscosity: 0.6 },
+  // the cloth as it came: zero gravity, floating on its hand-arranged drape
+  Original: { hang: 'Free', pinSpread: 1, gravity: 0, wind: 0, viscosity: 0.6 },
 };
 
 const PRESET_VALUES: Record<string, PresetBundle> = {
@@ -338,7 +343,7 @@ export default function App() {
       },
       mode: {
         type: 'select' as const,
-        options: ['Flag', 'Poster'],
+        options: ['Flag', 'Poster', 'Original'],
         default: 'Flag',
       },
       material: {
@@ -565,6 +570,10 @@ export default function App() {
         app.setBumpMap(bumpImg);
         app.setClothImage(clothImg);
         app.refreshGridArt();
+        if (CLEAN) {
+          app.warmUp(6);
+          app.frameCloth();
+        }
         dial.setValues({ images: { useImage: true } } as never);
         setLoadPercent(100);
         app.reveal();
@@ -682,7 +691,7 @@ export default function App() {
         ref={hostRef}
         style={{ opacity: assetsReady ? 1 : 0, transition: 'opacity 0.6s ease' }}
       />
-      {assetsReady && (
+      {assetsReady && !CLEAN && (
         <div style={TRAY_STYLE}>
           <div style={TRAY_LABEL_STYLE}>Stickers</div>
           <div style={TRAY_GRID_STYLE}>
@@ -792,7 +801,7 @@ export default function App() {
           />,
           bumpAnchor,
         )}
-      <DialRoot position="top-right" defaultOpen productionEnabled />
+      {!CLEAN && <DialRoot position="top-right" defaultOpen productionEnabled />}
       {!loaderGone && <Loader percent={loadPercent} hiding={assetsReady} />}
     </>
   );

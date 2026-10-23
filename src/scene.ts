@@ -461,6 +461,23 @@ export class HoloApp {
     return loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
   }
 
+  /** Run the sim ahead without rendering, so a still opens on a flag already in the wind. */
+  warmUp(seconds: number) {
+    if (!this.params) return;
+    for (let t = 0; t < seconds; t += 1 / 60) this.sim.step(1 / 60, this.params.physics);
+    this.clothGeometry.attributes.position.needsUpdate = true;
+    this.clothGeometry.computeVertexNormals();
+  }
+
+  /** Aim the camera at the cloth's centre (the default view leaves room for the panel). */
+  frameCloth() {
+    this.clothGeometry.computeBoundingBox();
+    const box = this.clothGeometry.boundingBox;
+    if (!box) return;
+    box.getCenter(this.controls.target);
+    this.controls.update();
+  }
+
   /** Startup art just landed: put the chosen grid pattern over it, unless it's Original. */
   refreshGridArt() {
     if (!this.params) return;
