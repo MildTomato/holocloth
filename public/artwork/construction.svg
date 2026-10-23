@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="3000" viewBox="0 0 2000 3000" fill="none" stroke="#1a1a1a" stroke-width="2">
+  <!-- 2:3 page, same proportions as the original poster, so the cloth keeps its size -->
+  <defs>
+    <filter id="soft" x="-200" y="-200" width="2400" height="3400" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="40"/>
+      <feColorMatrix type="saturate" values="0.4"/>
+    </filter>
+  </defs>
+  <!-- the original poster's printed gradient, with its linework removed -->
+  <image href="data:image/png;base64,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" x="-120" y="-180" width="2240" height="3360" preserveAspectRatio="none" filter="url(#soft)"/>
+  <g transform="translate(53 1207.5)">
+    <!-- unit s = 229: circle radius, half the frame height -->
+    <g>
+      <line x1="276" y1="290" x2="1651" y2="290"/>
+      <line x1="734" y1="61" x2="734" y2="519"/>
+      <line x1="1192" y1="61" x2="1192" y2="519"/>
+    </g>
+    <g>
+      <circle cx="276" cy="290" r="229"/>
+      <circle cx="1650" cy="290" r="229"/>
+      <line x1="963" y1="61" x2="963" y2="519"/>
+    </g>
+    <g>
+      <ellipse cx="848.5" cy="290" rx="114.5" ry="229"/>
+      <circle cx="1192" cy="290" r="229"/>
+    </g>
+    <rect x="505" y="61" width="916" height="458"/>
+  </g>
+  <!-- corner labels and the margin rule between them -->
+  <g fill="#1a1a1a" stroke="none" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="44" font-weight="300" letter-spacing="0.5">
+    <text x="100" y="132">Petabyte</text>
+    <text x="100" y="2900">Prototype</text>
+  </g>
+  <line x1="100" y1="176" x2="100" y2="2826" stroke="#1a1a1a" stroke-width="2"/>
+</svg>

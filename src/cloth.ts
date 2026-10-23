@@ -10,7 +10,25 @@ export interface ClothPhysicsParams {
   iterations: number;
   /** 0..0.3 — laplacian smoothing, relaxes wrinkles back out */
   smoothing: number;
+  /** world units/s^2 pulling -Y. 0 keeps the original zero-gravity float. */
+  gravity?: number;
+  /** wind strength in world units/s^2. 0 is still air. */
+  wind?: number;
+  /** wind heading in degrees around Y: 0 blows along +Z, out of the sheet. */
+  windDir?: number;
+  /** 0..3 — how much of the wind goes into the travelling ripple. */
+  flutter?: number;
+  /** 0..1 — slow gust envelope, so the wind breathes instead of running flat. */
+  gust?: number;
+  /**
+   * Weather instead of a fan: wind strength, heading and gravity all wander,
+   * with the odd lull where the wind drops, the sheet sags, then it picks up.
+   */
+  dynamicWind?: boolean;
 }
+
+/** How the sheet is held up: floating free, pinned at the top, or on a hoist. */
+export type HangMode = 'Free' | 'Two pins' | 'Top edge' | 'Flag';
 
 interface GrabState {
   indices: number[];
@@ -24,9 +42,10 @@ const SUBSTEP = 1 / 120;
 const MAX_SUBSTEPS = 4;
 
 /**
- * Verlet cloth in zero gravity. No external forces — motion only comes from
- * user interaction, and heavy velocity damping makes it settle like it is
- * suspended in gel.
+ * Verlet cloth. With gravity at 0 and nothing pinned there are no external
+ * forces at all: motion only comes from user interaction, and heavy velocity
+ * damping makes it settle like it is suspended in gel. Turn gravity up and
+ * pin the top edge and it hangs like a poster instead.
  */
 export class ClothSim {
   readonly cols: number;
@@ -47,6 +66,18 @@ export class ClothSim {
 
   private grab: GrabState | null = null;
   private accumulator = 0;
+
+  /** pinned vertex indices, and the world positions they are held at */
+  private pins: number[] = [];
+  private pinPos = new Float32Array(0);
+  private hang: HangMode = 'Free';
+  private pinSpread = 1;
+  /** sim clock, drives the wind */
+  private time = 0;
+  /** dynamic-wind lull: a few seconds where the wind drops away */
+  private lull = { start: -1, dur: 1, next: 4 };
+  /** this substep's weather, multipliers on the panel's settings */
+  private wx = { wind: 1, gravity: 1, dir: 0 };
 
   constructor(
     readonly width: number,
@@ -136,6 +167,82 @@ export class ClothSim {
     this.rest.set(this.positions);
   }
 
+  /**
+   * Flat rectangle in the XY plane, in PlaneGeometry's vertex order so row 0
+   * is the top edge. A hair of depth noise so gravity buckles the sheet into
+   * folds instead of holding it perfectly flat.
+   */
+  private flatPose() {
+    const stepX = this.width / this.segX;
+    const stepY = this.height / this.segY;
+    let k = 0;
+    for (let y = 0; y < this.rows; y++) {
+      for (let x = 0; x < this.cols; x++) {
+        this.positions[k] = -this.width / 2 + x * stepX;
+        this.positions[k + 1] = this.height / 2 - y * stepY;
+        this.positions[k + 2] = (Math.random() - 0.5) * stepX * 0.05;
+        k += 3;
+      }
+    }
+    this.prev.set(this.positions);
+    this.rest.set(this.positions);
+  }
+
+  /** Anchors sit on the flat rest edge, so the hang line stays straight. */
+  private buildPins() {
+    const idxs: number[] = [];
+    if (this.hang === 'Top edge') {
+      for (let x = 0; x < this.cols; x++) idxs.push(x);
+    } else if (this.hang === 'Two pins') {
+      idxs.push(0, this.cols - 1);
+    } else if (this.hang === 'Flag') {
+      // the hoist: the whole left edge rides the pole
+      for (let y = 0; y < this.rows; y++) idxs.push(y * this.cols);
+    }
+    this.pins = idxs;
+    this.pinPos = new Float32Array(idxs.length * 3);
+    // spread < 1 draws the pins in along the hang line, slackening it
+    const sx = this.hang === 'Flag' ? 1 : this.pinSpread;
+    const sy = this.hang === 'Flag' ? this.pinSpread : 1;
+    for (let k = 0; k < idxs.length; k++) {
+      const gx = idxs[k] % this.cols;
+      const gy = Math.floor(idxs[k] / this.cols);
+      this.pinPos[k * 3] = (gx / this.segX - 0.5) * this.width * sx;
+      this.pinPos[k * 3 + 1] = (0.5 - gy / this.segY) * this.height * sy;
+      this.pinPos[k * 3 + 2] = 0;
+    }
+  }
+
+  /** 0 at the held edge, 1 at the free end — the sheet loosens as it goes. */
+  private freeEnd(gx: number, gy: number) {
+    return this.hang === 'Flag' ? gx / this.segX : gy / this.segY;
+  }
+
+  get hangMode() {
+    return this.hang;
+  }
+
+  /** Free re-poses to the baked drape; hanging modes re-pose flat and pin. */
+  setHang(mode: HangMode) {
+    if (mode === this.hang) return;
+    this.hang = mode;
+    if (mode === 'Free') {
+      this.pins = [];
+      this.pinPos = new Float32Array(0);
+      this.initPositions();
+      return;
+    }
+    // a different hang line means a different drape: start it flat again
+    this.flatPose();
+    this.buildPins();
+  }
+
+  setPinSpread(spread: number) {
+    if (spread === this.pinSpread) return;
+    this.pinSpread = spread;
+    if (this.hang !== 'Free') this.buildPins();
+  }
+
   private computeRestLengths() {
     // rest lengths come from the flat, unbillowed grid so the cloth
     // relaxes toward its true rectangle
@@ -152,7 +259,12 @@ export class ClothSim {
   }
 
   reset() {
-    this.initPositions();
+    if (this.hang === 'Free') {
+      this.initPositions();
+    } else {
+      this.flatPose();
+      this.buildPins();
+    }
     this.grab = null;
   }
 
@@ -173,6 +285,21 @@ export class ClothSim {
       if (d > radius) continue;
       const w = 1 - d / radius;
       const s = w * w * (3 - 2 * w); // smoothstep
+      this.prev[i * 3] -= dir.x * s;
+      this.prev[i * 3 + 1] -= dir.y * s;
+      this.prev[i * 3 + 2] -= dir.z * s;
+    }
+  }
+
+  /** Push the cloth around a world-space point, e.g. a sticker slapped on. */
+  impulse(point: THREE.Vector3, dir: THREE.Vector3, radius: number) {
+    const p = this.positions;
+    for (let i = 0; i < this.count; i++) {
+      const dx = p[i * 3] - point.x, dy = p[i * 3 + 1] - point.y, dz = p[i * 3 + 2] - point.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (d > radius) continue;
+      const w = 1 - d / radius;
+      const s = w * w * (3 - 2 * w);
       this.prev[i * 3] -= dir.x * s;
       this.prev[i * 3 + 1] -= dir.y * s;
       this.prev[i * 3 + 2] -= dir.z * s;
@@ -292,6 +419,18 @@ export class ClothSim {
       p[i] = cur + vel;
     }
 
+    this.updateWeather(params);
+
+    // gravity as a Verlet acceleration term, on the Y component of each vertex
+    const g = (params.gravity ?? 0) * this.wx.gravity;
+    if (g !== 0) {
+      const dv = -g * SUBSTEP * SUBSTEP;
+      for (let i = 1; i < n * 3; i += 3) p[i] += dv;
+    }
+
+    this.time += SUBSTEP;
+    this.applyWind(params);
+
     // laplacian smoothing — wrinkles relax back out, gel-like
     if (params.smoothing > 0) {
       const k = params.smoothing * 0.5;
@@ -331,6 +470,7 @@ export class ClothSim {
         p[ib] -= ox; p[ib + 1] -= oy; p[ib + 2] -= oz;
       }
       this.applyGrab();
+      this.applyPins();
     }
   }
 
@@ -347,6 +487,82 @@ export class ClothSim {
       p[i] += (tx - p[i]) * w;
       p[i + 1] += (ty - p[i + 1]) * w;
       p[i + 2] += (tz - p[i + 2]) * w;
+    }
+  }
+
+  /**
+   * Artificial wind: a steady push along the heading, plus a ripple that
+   * travels from the held edge toward the free end. Both grow with distance
+   * from the pins, which is what makes a flag crack at its tail and stay
+   * taut at the hoist. No aerodynamics — it is shaped by eye.
+   */
+  private updateWeather(params: ClothPhysicsParams) {
+    if (!params.dynamicWind) {
+      this.wx.wind = 1;
+      this.wx.gravity = 1;
+      this.wx.dir = 0;
+      return;
+    }
+    const t = this.time;
+    // slow wander from incommensurate sines, so it never falls into a beat
+    const nWind = Math.sin(t * 0.37) * 0.6 + Math.sin(t * 0.91 + 2.1) * 0.4;
+    const nGrav = Math.sin(t * 0.23 + 1.7) * 0.7 + Math.sin(t * 0.61 + 0.4) * 0.3;
+    const nDir = Math.sin(t * 0.29 + 4.0) * 0.6 + Math.sin(t * 0.71 + 3.3) * 0.4;
+    // every 5-12s a 4-7s lull: the wind eases off, the sheet settles lower,
+    // then it lifts again — slow in and out so nothing drops suddenly
+    if (t >= this.lull.next) {
+      this.lull.start = t;
+      this.lull.dur = 4 + Math.random() * 3;
+      this.lull.next = t + this.lull.dur + 5 + Math.random() * 7;
+    }
+    const lt = (t - this.lull.start) / this.lull.dur;
+    const dip = lt >= 0 && lt <= 1 ? Math.sin(Math.PI * lt) ** 4 : 0;
+    this.wx.wind = (1 + 0.3 * nWind) * (1 - 0.55 * dip);
+    this.wx.gravity = 1 + 0.12 * nGrav + 0.2 * dip;
+    // swings between sideways and slightly away, never toward the viewer
+    this.wx.dir = 30 + 30 * nDir;
+  }
+
+  private applyWind(params: ClothPhysicsParams) {
+    const w = (params.wind ?? 0) * this.wx.wind;
+    if (w <= 0) return;
+    const th = (((params.windDir ?? 75) + this.wx.dir) * Math.PI) / 180;
+    const dirX = Math.sin(th);
+    const dirZ = Math.cos(th);
+    const flut = params.flutter ?? 1;
+    const t = this.time;
+    // two incommensurate rates, so gusts never land on an obvious beat
+    const gust = params.gust ?? 0;
+    const env = 1 - gust * 0.5 * (1 - Math.sin(t * 0.7) * Math.sin(t * 0.31 + 1.3));
+    const dt2 = SUBSTEP * SUBSTEP;
+    const p = this.positions;
+    for (let gy = 0; gy < this.rows; gy++) {
+      for (let gx = 0; gx < this.cols; gx++) {
+        const i = (gy * this.cols + gx) * 3;
+        const u = this.freeEnd(gx, gy);
+        const ramp = 0.25 + 0.75 * u * u;
+        const f = w * env * ramp * dt2;
+        // the ripple runs down the sheet and skews across it, so the folds
+        // sit diagonally rather than as straight bars
+        const wave = Math.sin(t * 5.5 - u * 9 + (gy / this.rows) * 4.5);
+        p[i] += dirX * f;
+        p[i + 2] += dirZ * f + flut * f * wave * 1.6;
+      }
+    }
+  }
+
+  /** Snap pinned vertices back onto their anchors, with zero velocity. */
+  private applyPins() {
+    const pins = this.pins;
+    if (pins.length === 0) return;
+    const p = this.positions;
+    const prev = this.prev;
+    const a = this.pinPos;
+    for (let k = 0; k < pins.length; k++) {
+      const i = pins[k] * 3;
+      p[i] = prev[i] = a[k * 3];
+      p[i + 1] = prev[i + 1] = a[k * 3 + 1];
+      p[i + 2] = prev[i + 2] = a[k * 3 + 2];
     }
   }
 }

@@ -11,6 +11,7 @@ export interface HoloUniforms {
   uSparkle: THREE.IUniform<number>;
   uSpecTint: THREE.IUniform<number>;
   uSurfaceMap: THREE.IUniform<THREE.Texture>;
+  uStickerMap: THREE.IUniform<THREE.Texture>;
   uSurfaceOpacity: THREE.IUniform<number>;
   uCavityAmount: THREE.IUniform<number>;
   uCornerRound: THREE.IUniform<number>;
@@ -29,7 +30,10 @@ export interface HoloMaterial {
  *  - injected diffraction layer: micro-flake cells whose hue sweeps with the
  *    view angle, like the diffraction grating on holo foil
  */
-export function createHoloMaterial(surfaceTexture: THREE.Texture): HoloMaterial {
+export function createHoloMaterial(
+  surfaceTexture: THREE.Texture,
+  stickerTexture: THREE.Texture,
+): HoloMaterial {
   // the bump/normal map is loaded asynchronously by the engine (default
   // scratch texture or a user upload) — none at creation time
   const roughnessMap = makeGrainRoughnessMap();
@@ -61,6 +65,7 @@ export function createHoloMaterial(surfaceTexture: THREE.Texture): HoloMaterial 
     uSparkle: { value: 0.6 },
     uSpecTint: { value: 0.85 },
     uSurfaceMap: { value: surfaceTexture },
+    uStickerMap: { value: stickerTexture },
     uSurfaceOpacity: { value: 1.0 },
     uCavityAmount: { value: 0 },
     uCornerRound: { value: 0 },
@@ -92,6 +97,7 @@ export function createHoloMaterial(surfaceTexture: THREE.Texture): HoloMaterial 
       uniform float uSparkle;
       uniform float uSpecTint;
       uniform sampler2D uSurfaceMap;
+      uniform sampler2D uStickerMap;
       uniform float uSurfaceOpacity;
       varying float vCavity;
       uniform float uCavityAmount;
@@ -113,6 +119,8 @@ export function createHoloMaterial(surfaceTexture: THREE.Texture): HoloMaterial 
       shader.fragmentShader.replace(
         '#include <emissivemap_fragment>',
         /* glsl */ `#include <emissivemap_fragment>
+        // vinyl stickers cover the foil: where they sit, no diffraction
+        float stickerA = 0.0;
         {
           // rounded-corner cutout: rounded-rect SDF in cloth space; sharp at 0
           if (uCornerRound > 0.0) {
@@ -132,6 +140,13 @@ export function createHoloMaterial(surfaceTexture: THREE.Texture): HoloMaterial 
           float surfA = surf.a * uSurfaceOpacity;
           diffuseColor.rgb = mix(diffuseColor.rgb, surf.rgb, surfA);
           metalnessFactor = mix(metalnessFactor, 0.05, surfA * 0.8);
+
+          // stickers: their own printed colour, a dielectric gloss finish
+          vec4 stk = texture2D(uStickerMap, vHoloUv);
+          stickerA = stk.a;
+          diffuseColor.rgb = mix(diffuseColor.rgb, stk.rgb, stickerA);
+          metalnessFactor = mix(metalnessFactor, 0.0, stickerA);
+          roughnessFactor = mix(roughnessFactor, 0.35, stickerA);
 
           vec3 hView = normalize(vViewPosition);
           float facing = clamp(abs(dot(normal, hView)), 0.0, 1.0);
@@ -161,13 +176,24 @@ export function createHoloMaterial(surfaceTexture: THREE.Texture): HoloMaterial 
           // folds swallow the glow where cavity occlusion applies
           float energy = (0.22 + 0.78 * fres) * flake;
           float holoAO = 1.0 - uCavityAmount * vCavity * 0.8;
-          totalEmissiveRadiance += rainbow * uHoloIntensity * (energy * 0.55 + glint * fres * 0.5) * holoAO;
+          totalEmissiveRadiance += rainbow * uHoloIntensity * (energy * 0.55 + glint * fres * 0.5) * holoAO
+            * (1.0 - stickerA);
 
           // tint the metallic F0 so specular reflections go iridescent —
           // this is what makes real holo foil flash color, not glow
           vec3 tinted = diffuseColor.rgb * (0.25 + rainbow * 1.9);
-          diffuseColor.rgb = mix(diffuseColor.rgb, tinted, uSpecTint);
+          diffuseColor.rgb = mix(diffuseColor.rgb, tinted, uSpecTint * (1.0 - stickerA));
         }`,
+      ).replace(
+        '#include <lights_physical_fragment>',
+        /* glsl */ `#include <lights_physical_fragment>
+        // no thin-film rainbow or fabric sheen on sticker vinyl
+        #ifdef USE_IRIDESCENCE
+          material.iridescence *= 1.0 - stickerA;
+        #endif
+        #ifdef USE_SHEEN
+          material.sheenColor *= 1.0 - stickerA;
+        #endif`,
       ).replace(
         '#include <aomap_fragment>',
         /* glsl */ `#include <aomap_fragment>

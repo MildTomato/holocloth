@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDialKitController, DialRoot, DialStore } from 'dialkit';
 import { HoloApp, type HoloParams, type ImagesState } from './scene.ts';
+import { STICKER_SHEET } from './stickers.ts';
 
 /** Shared renderer settings — identical across every preset. */
 const RENDER_DEFAULTS = {
   background: '#0b0c12',
-  exposure: 0.5,
+  exposure: 0.6,
   environment: 0.73,
-  bloom: 0.05,
+  bloom: 0.03,
   bloomThreshold: 1.41,
   noise: 0.345,
   toneMapping: 'Neutral',
@@ -37,19 +38,20 @@ const PRESET_VALUES: Record<string, PresetBundle> = {
     material: {
       finish: 'Matte',
       baseColor: '#20242d',
-      holoIntensity: 3.78,
+      holoIntensity: 1.13,
       holoScale: 400,
-      bandFreq: 1.1,
-      saturation: 1.0,
-      hueShift: 0.37,
+      bandFreq: 2.7,
+      saturation: 0.37,
+      hueShift: 0.14,
       sparkle: 0.73,
       specTint: 0.33,
       iridescence: 0.81,
-      metalness: 1.0,
-      sheen: 0,
+      metalness: 0.93,
+      sheen: 0.7,
       bump: 3.0,
       bumpTiling: 3,
       ...FINISH_VALUES.Matte,
+      clearcoat: 0.53,
     },
     render: { ...RENDER_DEFAULTS },
   },
@@ -317,36 +319,63 @@ export default function App() {
           default: 'Matte',
         },
         baseColor: '#20242d',
-        holoIntensity: [3.78, 0, 4, 0.01],
+        holoIntensity: [1.13, 0, 4, 0.01],
         holoScale: [400, 8, 400, 1],
-        bandFreq: [1.1, 0.2, 10, 0.05],
-        saturation: [1, 0, 1, 0.01],
-        hueShift: [0.37, 0, 1, 0.01],
+        bandFreq: [2.7, 0.2, 10, 0.05],
+        saturation: [0.37, 0, 1, 0.01],
+        hueShift: [0.14, 0, 1, 0.01],
         sparkle: [0.73, 0, 2, 0.01],
         specTint: [0.33, 0, 1, 0.01],
         iridescence: [0.81, 0, 1, 0.01],
         roughness: [0.62, 0, 1, 0.01],
-        metalness: [1, 0, 1, 0.01],
-        clearcoat: [0.06, 0, 1, 0.01],
+        metalness: [0.93, 0, 1, 0.01],
+        clearcoat: [0.53, 0, 1, 0.01],
         coatRoughness: [0.7, 0, 1, 0.01],
-        sheen: [0, 0, 1, 0.01],
+        sheen: [0.7, 0, 1, 0.01],
         bump: [3, 0, 3, 0.01],
         bumpTiling: [3, 1, 12, 0.5],
         uploadBump: { type: 'action' as const, label: 'Upload bump map' },
+      },
+      grid: {
+        pattern: {
+          type: 'select' as const,
+          options: ['Original', 'Generated', 'Growth'],
+          default: 'Growth',
+        },
+        steps: [6, 2, 8, 1],
+        rows: [2, 1, 6, 1],
+        depth: [1, 0, 3, 1],
+        fill: [0.6, 0, 1, 0.01],
+        endCircles: true,
+        guides: true,
+        seed: [7, 1, 999, 1],
+        shuffle: { type: 'action' as const, label: 'Shuffle grid' },
       },
       physics: {
         _collapsed: true,
         viscosity: [0.6, 0.0, 0.6, 0.005],
         stiffness: [1, 0.2, 1, 0.01],
         iterations: [14, 1, 14, 1],
-        smoothing: [0.045, 0, 0.3, 0.005],
+        smoothing: [0.14, 0, 0.3, 0.005],
         grabRadius: [0.27, 0.05, 1.2, 0.01],
+        hang: {
+          type: 'select' as const,
+          options: ['Free', 'Two pins', 'Top edge', 'Flag'],
+          default: 'Two pins',
+        },
+        pinSpread: [0.94, 0.6, 1, 0.005],
+        gravity: [9.8, 0, 40, 0.1],
+        wind: [0, 0, 60, 0.5],
+        windDir: [83, -180, 180, 1],
+        flutter: [1.2, 0, 3, 0.01],
+        gust: [0.6, 0, 1, 0.01],
+        dynamicWind: true,
       },
       images: {
         _collapsed: true,
         useImage: false,
         edit: false,
-        scale: [0.35, 0.02, 2.5, 0.01],
+        scale: [0.46, 0.02, 2.5, 0.01],
         rotation: [0, -180, 180, 1],
         opacity: [1, 0, 1, 0.01],
         cornerRadius: [0, 0, 1, 0.01],
@@ -380,6 +409,8 @@ export default function App() {
       exportPNGClear: { type: 'action' as const, label: 'Export PNG (no background)' },
       resetCloth: { type: 'action' as const, label: 'Reset cloth' },
       poke: { type: 'action' as const, label: 'Poke' },
+      hangPoster: { type: 'action' as const, label: 'Hang as poster' },
+      flyFlag: { type: 'action' as const, label: 'Fly as flag' },
     },
     {
       id: 'holocloth',
@@ -387,7 +418,30 @@ export default function App() {
         const name = path.split('.').pop();
         const app = appRef.current;
         if (!app) return;
-        if (name === 'resetCloth') app.resetCloth();
+        if (name === 'shuffle') {
+          dial.setValues({
+            grid: { pattern: 'Generated', seed: 1 + Math.floor(Math.random() * 999) },
+          } as never);
+        } else if (name === 'hangPoster') {
+          dial.setValues({
+            physics: { hang: 'Two pins', pinSpread: 0.94, gravity: 9.8, wind: 0, viscosity: 0.6 },
+          } as never);
+        } else if (name === 'flyFlag') {
+          dial.setValues({
+            physics: {
+              hang: 'Flag',
+              pinSpread: 1,
+              gravity: 4.5,
+              // less gel than the poster, or the ripple dies before it travels
+              viscosity: 0.25,
+              wind: 22,
+              // mostly streaming away from the pole, so the face stays on camera
+              windDir: 75,
+              flutter: 1.2,
+              gust: 0.6,
+            },
+          } as never);
+        } else if (name === 'resetCloth') app.resetCloth();
         else if (name === 'poke') app.poke();
         else if (name === 'exportPNG') app.exportPNG(false);
         else if (name === 'exportPNGClear') app.exportPNG(true);
@@ -407,6 +461,50 @@ export default function App() {
   const params = dial.values;
 
   const [, setImagesRev] = useState(0);
+  // the sticker currently in the hand, following the pointer
+  const [ghost, setGhost] = useState<StickerGhost | null>(null);
+
+  /**
+   * Carry a sticker with the pointer until release: dropped on the cloth it
+   * sticks there, dropped anywhere else it is thrown away. Used for both the
+   * sheet and stickers peeled off the cloth.
+   */
+  const carrySticker = (
+    img: HTMLImageElement,
+    start: { clientX: number; clientY: number; pointerId: number },
+    rotation: number,
+    fromCloth: boolean,
+  ) => {
+    const overCloth = (x: number, y: number) => !!appRef.current?.uvAt(x, y);
+    setGhost({
+      src: img.src,
+      x: start.clientX,
+      y: start.clientY,
+      rotation,
+      fromCloth,
+      over: overCloth(start.clientX, start.clientY),
+    });
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== start.pointerId) return;
+      const over = overCloth(ev.clientX, ev.clientY);
+      setGhost((g) => g && { ...g, x: ev.clientX, y: ev.clientY, over });
+    };
+    const finish = (ev: PointerEvent) => {
+      if (ev.pointerId !== start.pointerId) return;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      const a = appRef.current;
+      if (a) {
+        if (ev.type === 'pointerup') a.stickAt(ev.clientX, ev.clientY, img, rotation);
+        a.endStickerDrag();
+      }
+      setGhost(null);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  };
   const [loadPercent, setLoadPercent] = useState(0);
   const [assetsReady, setAssetsReady] = useState(false);
   const [loaderGone, setLoaderGone] = useState(false);
@@ -419,10 +517,11 @@ export default function App() {
       dial.setValues({ images: { scale, rotation } } as never);
     };
     app.onImagesChanged = () => setImagesRev((v) => v + 1);
+    app.onStickerPick = (item, e) => carrySticker(item.img, e, item.rotation, true);
     // startup assets: cloth poster + bump map, with combined download
     // progress driving the loader; the cloth stays hidden until both land
     const assets = [
-      { url: '/holo-bg-2.jpg', loaded: 0, total: 0, done: false },
+      { url: '/artwork/construction.svg', loaded: 0, total: 0, done: false },
       { url: '/bump-scratches.jpg', loaded: 0, total: 0, done: false },
     ];
     const report = () => {
@@ -452,6 +551,7 @@ export default function App() {
         if (appRef.current !== app) return; // unmounted meanwhile
         app.setBumpMap(bumpImg);
         app.setClothImage(clothImg);
+        app.refreshGridArt();
         dial.setValues({ images: { useImage: true } } as never);
         setLoadPercent(100);
         app.reveal();
@@ -545,6 +645,46 @@ export default function App() {
         ref={hostRef}
         style={{ opacity: assetsReady ? 1 : 0, transition: 'opacity 0.6s ease' }}
       />
+      {assetsReady && (
+        <div style={TRAY_STYLE}>
+          <div style={TRAY_LABEL_STYLE}>Stickers</div>
+          <div style={TRAY_GRID_STYLE}>
+            {STICKER_SHEET.map((s) => (
+              <img
+                key={s.id}
+                src={s.url}
+                alt=""
+                draggable={false}
+                style={TRAY_STICKER_STYLE}
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.preventDefault();
+                  // each one lands at its own slight angle, like a hand put it there
+                  carrySticker(e.currentTarget, e, (Math.random() - 0.5) * 28, false);
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {ghost && (
+        <>
+          <img
+            src={ghost.src}
+            alt=""
+            style={{
+              ...GHOST_STYLE,
+              left: ghost.x,
+              top: ghost.y,
+              opacity: ghost.over ? 1 : 0.7,
+              transform: `translate(-50%, -50%) rotate(${ghost.rotation}deg) scale(1.1)`,
+            }}
+          />
+          {ghost.fromCloth && !ghost.over && (
+            <div style={{ ...GHOST_HINT_STYLE, left: ghost.x, top: ghost.y - 78 }}>Remove</div>
+          )}
+        </>
+      )}
       <input
         ref={decalInputRef}
         type="file"
@@ -620,3 +760,67 @@ export default function App() {
     </>
   );
 }
+
+interface StickerGhost {
+  src: string;
+  x: number;
+  y: number;
+  rotation: number;
+  fromCloth: boolean;
+  /** pointer is over the cloth, so releasing will stick it */
+  over: boolean;
+}
+
+const TRAY_STYLE: React.CSSProperties = {
+  position: 'fixed',
+  left: 16,
+  bottom: 16,
+  padding: 12,
+  borderRadius: 12,
+  background: 'rgba(22, 22, 26, 0.86)',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  backdropFilter: 'blur(14px)',
+  userSelect: 'none',
+  zIndex: 10,
+};
+
+const TRAY_LABEL_STYLE: React.CSSProperties = {
+  font: '500 11px/1 system-ui, sans-serif',
+  color: 'rgba(255, 255, 255, 0.55)',
+  marginBottom: 10,
+};
+
+const TRAY_GRID_STYLE: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, 64px)',
+  gap: 6,
+};
+
+const TRAY_STICKER_STYLE: React.CSSProperties = {
+  width: 64,
+  height: 64,
+  cursor: 'grab',
+  touchAction: 'none',
+};
+
+const GHOST_STYLE: React.CSSProperties = {
+  position: 'fixed',
+  width: 120,
+  height: 120,
+  pointerEvents: 'none',
+  filter: 'drop-shadow(0 14px 16px rgba(0, 0, 0, 0.45))',
+  transition: 'opacity 0.12s ease',
+  zIndex: 20,
+};
+
+const GHOST_HINT_STYLE: React.CSSProperties = {
+  position: 'fixed',
+  transform: 'translateX(-50%)',
+  padding: '4px 8px',
+  borderRadius: 6,
+  background: '#111',
+  color: '#fff',
+  font: '500 11px/1 system-ui, sans-serif',
+  pointerEvents: 'none',
+  zIndex: 21,
+};

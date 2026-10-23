@@ -6,12 +6,13 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { ClothSim } from './cloth.ts';
+import { ClothSim, type HangMode } from './cloth.ts';
 import { createHoloMaterial, type HoloUniforms } from './holoMaterial.ts';
 import { SurfaceLayer, type DecalItem } from './decals.ts';
 import { normalMapFromImage } from './textures.ts';
 import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
+import { gridSvg, growthSvg, loadImage, fetchDataUrl } from './gridArt.ts';
 
 /** Per-version snapshot of everything image-related (session-scoped). */
 export interface ImagesState {
@@ -27,6 +28,14 @@ export interface HoloParams {
     iterations: number;
     smoothing: number;
     grabRadius: number;
+    gravity: number;
+    hang: string;
+    pinSpread: number;
+    wind: number;
+    windDir: number;
+    flutter: number;
+    gust: number;
+    dynamicWind: boolean;
   };
   material: {
     preset: string;
@@ -47,6 +56,17 @@ export interface HoloParams {
     sheen: number;
     bump: number;
     bumpTiling: number;
+  };
+  grid: {
+    pattern: string;
+    /** Growth: how many halvings from Petabyte down to Prototype */
+    steps: number;
+    rows: number;
+    depth: number;
+    fill: number;
+    endCircles: boolean;
+    guides: boolean;
+    seed: number;
   };
   images: {
     edit: boolean;
@@ -80,6 +100,8 @@ const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
 };
 
 const CLOTH_LONG_SIDE = 3;
+/** sticker width as a fraction of cloth width */
+const STICKER_SCALE = 0.26;
 const CLOTH_SEGMENTS = 48;
 const WHITE = new THREE.Color(0xffffff);
 
@@ -169,6 +191,16 @@ export class HoloApp {
   onDecalSelect: ((scale: number, rotation: number) => void) | null = null;
   /** App-level hook: any uploaded image (cloth/decal/bump) changed. */
   onImagesChanged: (() => void) | null = null;
+  /** App-level hook: a sticker was peeled off the cloth; the app carries it from here. */
+  onStickerPick: ((item: DecalItem, e: PointerEvent) => void) | null = null;
+  /** stickers mid slap-down, animating their pop back to 1 */
+  private slaps: { item: DecalItem; t0: number }[] = [];
+  /** last grid settings applied; a change regenerates the cloth art */
+  private gridKey = '';
+  private gridJob = 0;
+  private gridTimer: number | null = null;
+  private gridField: Promise<string> | null = null;
+  private originalArt: Promise<HTMLImageElement> | null = null;
 
   constructor(private host: HTMLElement) {
     const width = host.clientWidth || window.innerWidth;
@@ -208,12 +240,13 @@ export class HoloApp {
 
     // surface layer (uploaded graphics) + cloth
     this.surface = new SurfaceLayer();
-    const holo = createHoloMaterial(this.surface.texture);
+    const holo = createHoloMaterial(this.surface.texture, this.surface.stickerTexture);
     this.holoMaterial = holo.material;
     this.holoUniforms = holo.uniforms;
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
     if (this.holoMaterial.roughnessMap) this.holoMaterial.roughnessMap.anisotropy = maxAniso;
     this.surface.texture.anisotropy = maxAniso;
+    this.surface.stickerTexture.anisotropy = maxAniso;
 
     this.clothMesh = new THREE.Mesh(undefined, this.holoMaterial);
     this.clothMesh.frustumCulled = false;
@@ -312,6 +345,10 @@ export class HoloApp {
 
   applyParams(p: HoloParams) {
     this.params = p;
+    this.updateGridArt(p.grid);
+    // spread first: setHang pins at the current spread
+    this.sim.setPinSpread(p.physics.pinSpread);
+    this.sim.setHang(p.physics.hang as HangMode);
     if (p.performance !== this.perfProfile) this.applyPerfProfile(p.performance);
     const m = this.holoMaterial;
     m.color.set(p.material.baseColor);
@@ -369,6 +406,73 @@ export class HoloApp {
       sel.rotation = p.images.rotation;
       this.surface.redraw();
     }
+  }
+
+  /**
+   * Original = the hand-drawn construction; Generated = the power-of-two
+   * grid built from these settings. Debounced, and stale results dropped,
+   * so dragging a slider doesn't queue up renders.
+   */
+  private updateGridArt(g: HoloParams['grid']) {
+    if (!g) return;
+    const generated = g.pattern === 'Generated' || g.pattern === 'Growth';
+    const key = g.pattern === 'Generated'
+      ? ['Generated', g.rows, g.depth, g.fill, g.endCircles, g.guides, g.seed].join('|')
+      : g.pattern === 'Growth'
+        ? ['Growth', g.steps, g.guides].join('|')
+        : 'Original';
+    if (key === this.gridKey) return;
+    const first = this.gridKey === '';
+    this.gridKey = key;
+    // at boot the app is already loading the original as the startup image
+    if (first && !generated) return;
+    const job = ++this.gridJob;
+    if (this.gridTimer !== null) window.clearTimeout(this.gridTimer);
+    this.gridTimer = window.setTimeout(() => {
+      this.gridTimer = null;
+      const art = generated
+        ? this.generateGridArt(g)
+        : (this.originalArt ??= loadImage('/artwork/construction.svg'));
+      art.then((img) => {
+        if (job !== this.gridJob || this.disposed) return;
+        this.swapClothArt(img);
+      }).catch((err) => console.error('[holocloth] grid art failed', err));
+    }, 90);
+  }
+
+  private async generateGridArt(g: HoloParams['grid']) {
+    const field = await (this.gridField ??= fetchDataUrl('/artwork/field.png'));
+    const svg = g.pattern === 'Growth'
+      ? growthSvg({ rows: g.steps, guides: g.guides }, field)
+      : gridSvg({
+        rows: g.rows,
+        depth: g.depth,
+        fill: g.fill,
+        endCircles: g.endCircles,
+        guides: g.guides,
+        seed: Math.round(g.seed),
+      }, field);
+    return loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+  }
+
+  /** Startup art just landed: put the chosen grid pattern over it, unless it's Original. */
+  refreshGridArt() {
+    if (!this.params) return;
+    this.gridKey = '';
+    this.updateGridArt(this.params.grid);
+  }
+
+  /** New artwork on the same cloth: keep the drape unless the shape changes. */
+  private swapClothArt(img: HTMLImageElement) {
+    const iw = img.naturalWidth || img.width || 1;
+    const ih = img.naturalHeight || img.height || 1;
+    const aspect = Math.min(3, Math.max(1 / 3, iw / ih));
+    if (Math.abs(aspect - this.clothAspect) > 1e-3) {
+      this.setClothImage(img);
+      return;
+    }
+    this.surface.setClothImage(img);
+    this.onImagesChanged?.();
   }
 
   resetCloth() {
@@ -534,8 +638,11 @@ export class HoloApp {
 
   /** After SurfaceLayer recreates its texture, point the shader at it. */
   private rebindSurfaceTexture() {
-    this.surface.texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    this.surface.texture.anisotropy = maxAniso;
+    this.surface.stickerTexture.anisotropy = maxAniso;
     this.holoUniforms.uSurfaceMap.value = this.surface.texture;
+    this.holoUniforms.uStickerMap.value = this.surface.stickerTexture;
   }
 
   /** Render one frame at high resolution and download it as a PNG. */
@@ -582,6 +689,42 @@ export class HoloApp {
     this.clothGeometry.computeBoundingSphere();
     const hits = this.raycaster.intersectObject(this.clothMesh, false);
     return hits.length > 0 ? hits[0] : null;
+  }
+
+  /** Cloth UV under a client-space point, or null when off the cloth. */
+  uvAt(clientX: number, clientY: number): THREE.Vector2 | null {
+    return this.clothHitAt(clientX, clientY)?.uv ?? null;
+  }
+
+  private clothHitAt(clientX: number, clientY: number) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointerNdc.set(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    return this.raycastCloth();
+  }
+
+  /**
+   * Slap a sticker onto the cloth under the pointer. Returns false when the
+   * pointer is off the cloth — the sticker is discarded.
+   */
+  stickAt(clientX: number, clientY: number, img: HTMLImageElement, rotation: number): boolean {
+    const hit = this.clothHitAt(clientX, clientY);
+    if (!hit?.uv) return false;
+    const item = this.surface.addSticker(img, hit.uv.x, hit.uv.y, STICKER_SCALE, rotation);
+    item.pop = 1.3;
+    this.slaps.push({ item, t0: this.elapsed });
+    // the hand pushes the fabric back as the sticker lands
+    const dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    this.sim.impulse(hit.point, dir.multiplyScalar(0.02), this.sim.width * 0.22);
+    this.onImagesChanged?.();
+    return true;
+  }
+
+  endStickerDrag() {
+    this.controls.enabled = true;
   }
 
   /** One-shot: next click on the cloth becomes the DOF focal point. */
@@ -650,6 +793,17 @@ export class HoloApp {
     if (this.spaceHeld) return;
     const hit = this.raycastCloth();
     if (!hit) return;
+
+    // stickers peel off on press, ahead of cloth grabbing
+    const peeled = hit.uv ? this.surface.stickerAt(hit.uv.x, hit.uv.y) : null;
+    if (peeled && this.onStickerPick) {
+      this.surface.remove(peeled);
+      this.slaps = this.slaps.filter((s) => s.item !== peeled);
+      this.controls.enabled = false; // endStickerDrag() turns it back on
+      this.onStickerPick(peeled, e);
+      this.onImagesChanged?.();
+      return;
+    }
 
     if (this.editMode) {
       if (!hit.uv) return;
@@ -747,6 +901,20 @@ export class HoloApp {
     const dt = this.clock.getDelta();
     this.elapsed += dt;
     this.grainPass.uniforms.uTime.value = this.elapsed % 61.7;
+
+    if (this.slaps.length > 0) {
+      // damped overshoot: lands big, dips just under, settles at 1
+      this.slaps = this.slaps.filter((s) => {
+        const t = this.elapsed - s.t0;
+        if (t >= 0.45) {
+          s.item.pop = 1;
+          return false;
+        }
+        s.item.pop = 1 + 0.3 * Math.exp(-9 * t) * Math.cos(14 * t);
+        return true;
+      });
+      this.surface.redrawStickers();
+    }
 
     if (this.params) {
       this.sim.step(dt, this.params.physics);
