@@ -174,7 +174,7 @@ const PRESET_VALUES: Record<string, PresetBundle> = {
  * portaled into containers we insert ourselves; a MutationObserver re-inserts
  * them whenever DialKit re-renders or a folder collapses/expands.
  */
-function usePanelAnchor(label: string): HTMLElement | null {
+function usePanelAnchor(label: string, where: 'after' | 'before' = 'after'): HTMLElement | null {
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const currentRef = useRef<HTMLElement | null>(null);
 
@@ -191,7 +191,9 @@ function usePanelAnchor(label: string): HTMLElement | null {
         }
         return;
       }
-      const next = (btn as HTMLElement).nextElementSibling as HTMLElement | null;
+      const next = (where === 'after'
+        ? (btn as HTMLElement).nextElementSibling
+        : (btn as HTMLElement).previousElementSibling) as HTMLElement | null;
       if (next && next.dataset.holochip === label) {
         if (currentRef.current !== next) {
           currentRef.current = next;
@@ -201,7 +203,7 @@ function usePanelAnchor(label: string): HTMLElement | null {
       }
       const c = document.createElement('div');
       c.dataset.holochip = label;
-      (btn as HTMLElement).insertAdjacentElement('afterend', c);
+      (btn as HTMLElement).insertAdjacentElement(where === 'after' ? 'afterend' : 'beforebegin', c);
       currentRef.current = c;
       setContainer(c);
     };
@@ -215,7 +217,7 @@ function usePanelAnchor(label: string): HTMLElement | null {
       currentRef.current?.remove();
       currentRef.current = null;
     };
-  }, [label]);
+  }, [label, where]);
 
   return container;
 }
@@ -385,6 +387,9 @@ export default function App() {
         default: 'Flag',
       },
       hands: false,
+      stickers: {
+        clearStickers: { type: 'action' as const, label: 'Clear stickers' },
+      },
       material: {
         preset: {
           type: 'select' as const,
@@ -503,7 +508,8 @@ export default function App() {
           dial.setValues({
             grid: { pattern: 'Generated', seed: 1 + Math.floor(Math.random() * 999) },
           } as never);
-        } else if (name === 'resetCloth') app.resetCloth();
+        } else if (name === 'clearStickers') app.clearStickers();
+        else if (name === 'resetCloth') app.resetCloth();
         else if (name === 'poke') app.poke();
         else if (name === 'exportPNG') app.exportPNG(false);
         else if (name === 'exportPNGClear') app.exportPNG(true);
@@ -743,6 +749,7 @@ export default function App() {
   const clothAnchor = usePanelAnchor('Image as cloth…');
   const decalAnchor = usePanelAnchor('Add image / SVG');
   const bumpAnchor = usePanelAnchor('Upload bump map');
+  const stickerAnchor = usePanelAnchor('Clear stickers', 'before');
 
   return (
     <>
@@ -751,9 +758,8 @@ export default function App() {
         ref={hostRef}
         style={{ opacity: assetsReady ? 1 : 0, transition: 'opacity 0.6s ease' }}
       />
-      {assetsReady && !CLEAN && (
-        <div style={TRAY_STYLE}>
-          <div style={TRAY_LABEL_STYLE}>Stickers</div>
+      {stickerAnchor && (
+        createPortal(
           <div style={TRAY_GRID_STYLE}>
             {STICKER_SHEET.map((s) => (
               <img
@@ -770,8 +776,9 @@ export default function App() {
                 }}
               />
             ))}
-          </div>
-        </div>
+          </div>,
+          stickerAnchor,
+        )
       )}
       {ghost && (
         <>
@@ -885,29 +892,13 @@ interface StickerGhost {
   over: boolean;
 }
 
-const TRAY_STYLE: React.CSSProperties = {
-  position: 'fixed',
-  left: 16,
-  bottom: 16,
-  padding: 12,
-  borderRadius: 12,
-  background: 'rgba(22, 22, 26, 0.86)',
-  border: '1px solid rgba(255, 255, 255, 0.08)',
-  backdropFilter: 'blur(14px)',
-  userSelect: 'none',
-  zIndex: 10,
-};
-
-const TRAY_LABEL_STYLE: React.CSSProperties = {
-  font: '500 11px/1 system-ui, sans-serif',
-  color: 'rgba(255, 255, 255, 0.55)',
-  marginBottom: 10,
-};
-
 const TRAY_GRID_STYLE: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(3, 64px)',
+  gridTemplateColumns: 'repeat(3, 1fr)',
+  justifyItems: 'center',
   gap: 6,
+  padding: '4px 0 10px',
+  userSelect: 'none',
 };
 
 const TRAY_STICKER_STYLE: React.CSSProperties = {

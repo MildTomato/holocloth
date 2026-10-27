@@ -641,6 +641,13 @@ export class HoloApp {
     this.sim.poke(1);
   }
 
+  /** Peel every sticker off. */
+  clearStickers() {
+    for (const d of [...this.surface.decals]) if (d.sticker) this.surface.remove(d);
+    this.slaps = [];
+    this.onImagesChanged?.();
+  }
+
   addDecal(img: HTMLImageElement) {
     const item = this.surface.addDecal(img);
     this.onDecalSelect?.(item.scale, item.rotation);
