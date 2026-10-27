@@ -14,7 +14,7 @@ import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
 import { gridSvg, growthSvg, barsSvg, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
-import { MetalCard, CARD_FRONT } from './card.ts';
+import { MetalCard } from './card.ts';
 import { HandTracker, type HandsFrame } from './handTracker.ts';
 import type { TrackerStatus } from './cameraTracker.ts';
 import { FaceCollider } from './faceCollider.ts';
@@ -31,6 +31,8 @@ export interface HoloParams {
   hands: boolean;
   /** Flag / Poster / Original / Face / Card */
   mode: string;
+  /** the metal card: linework printed or etched, and its corners */
+  card: { ink: string; etchDepth: number; etchBevel: number; corner: number };
   physics: {
     viscosity: number;
     stiffness: number;
@@ -405,6 +407,10 @@ export class HoloApp {
     this.setFaceTracking(p.physics.hang === 'Face');
     this.setHandTracking(!!p.hands);
     this.setCardMode(p.mode === 'Card');
+    if (p.card) {
+      this.card.setEtch(p.card.ink, p.card.etchDepth, p.card.etchBevel);
+      this.card.setCorner(p.card.corner);
+    }
     this.faceCollider.depth = p.physics.faceDepth;
     if (p.performance !== this.perfProfile) this.applyPerfProfile(p.performance);
     const m = this.holoMaterial;
@@ -704,7 +710,7 @@ export class HoloApp {
   /** Any part of the card under the pointer — for spinning it. */
   private raycastCard(): THREE.Intersection | null {
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
-    return this.raycaster.intersectObject(this.card.mesh, false)[0] ?? null;
+    return this.raycaster.intersectObject(this.card.group, true)[0] ?? null;
   }
 
   private startCardSpin(e: PointerEvent) {
@@ -882,8 +888,8 @@ export class HoloApp {
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
     if (this.cardMode) {
       // in Card mode the "surface" is the card's printed face
-      const hit = this.raycaster.intersectObject(this.card.mesh, false)[0];
-      return hit?.face?.materialIndex === CARD_FRONT ? hit : null;
+      const hit = this.raycaster.intersectObject(this.card.group, true)[0];
+      return hit?.object === this.card.face ? hit : null;
     }
     this.clothGeometry.computeBoundingSphere();
     const hits = this.raycaster.intersectObject(this.clothMesh, false);

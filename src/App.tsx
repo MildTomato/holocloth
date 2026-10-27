@@ -26,7 +26,7 @@ const RENDER_DEFAULTS = {
   environment: 0.73,
   bloom: 0.03,
   bloomThreshold: 1.41,
-  noise: 0.345,
+  noise: 0.15,
   toneMapping: 'Neutral',
   occlusion: true,
   occlusionStrength: 1,
@@ -120,7 +120,7 @@ const PRESET_VALUES: Record<string, PresetBundle> = {
       iridescence: 0.81,
       metalness: 0.93,
       sheen: 0.7,
-      bump: 3.0,
+      bump: 0.5,
       bumpTiling: 3,
       ...FINISH_VALUES.Matte,
       clearcoat: 0.53,
@@ -384,11 +384,21 @@ export default function App() {
       mode: {
         type: 'select' as const,
         options: ['Flag', 'Poster', 'Original', 'Face', 'Card'],
-        default: 'Flag',
+        default: 'Card',
       },
       hands: false,
       stickers: {
         clearStickers: { type: 'action' as const, label: 'Clear stickers' },
+      },
+      card: {
+        ink: {
+          type: 'select' as const,
+          options: ['Printed', 'Etched', 'Etched + filled'],
+          default: 'Printed',
+        },
+        etchDepth: [0.5, 0, 1, 0.01],
+        etchBevel: [1, 0.5, 8, 0.1],
+        corner: [0.04, 0, 0.3, 0.005],
       },
       material: {
         preset: {
@@ -415,7 +425,7 @@ export default function App() {
         clearcoat: [0.53, 0, 1, 0.01],
         coatRoughness: [0.7, 0, 1, 0.01],
         sheen: [0.7, 0, 1, 0.01],
-        bump: [3, 0, 3, 0.01],
+        bump: [0.5, 0, 3, 0.01],
         bumpTiling: [3, 1, 12, 0.5],
         uploadBump: { type: 'action' as const, label: 'Upload bump map' },
       },
