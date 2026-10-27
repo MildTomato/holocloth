@@ -387,6 +387,7 @@ export default function App() {
         default: 'Card',
       },
       hands: false,
+      cinematic: false,
       stickers: {
         clearStickers: { type: 'action' as const, label: 'Clear stickers' },
       },
@@ -394,11 +395,13 @@ export default function App() {
         ink: {
           type: 'select' as const,
           options: ['Printed', 'Etched', 'Etched + filled'],
-          default: 'Printed',
+          default: 'Etched',
         },
-        etchDepth: [0.5, 0, 1, 0.01],
-        etchBevel: [1, 0.5, 8, 0.1],
+        etchDepth: [0.15, 0, 1, 0.01],
+        etchBevel: [0.5, 0.5, 8, 0.1],
         corner: [0.04, 0, 0.3, 0.005],
+        shotLength: [2.2, 0.8, 6, 0.1],
+        drama: [0.7, 0, 1, 0.01],
       },
       material: {
         preset: {
@@ -691,6 +694,18 @@ export default function App() {
       // private mode / storage off: it just won't be remembered
     }
   }, [performance]);
+
+  // the cinematic reel is a card thing: switching it on brings the card out
+  const cinematic = params.cinematic;
+  const skipCinematic = useRef(true);
+  useEffect(() => {
+    if (skipCinematic.current) {
+      skipCinematic.current = false;
+      return;
+    }
+    if (cinematic) dial.setValues({ mode: 'Card' } as never);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cinematic]);
 
   // switching Hands on hands you the poster: the hands hold its corners
   const hands = params.hands;

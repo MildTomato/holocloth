@@ -63,6 +63,9 @@ export class MetalCard {
     uMapTexel: { value: new THREE.Vector2(1 / 2048, 1 / 3072) },
   };
   private rot = { x: 0, y: 0 };
+  /** an exact angle (and offset) held by the cinematic reel; null = spin and settle */
+  private posed: THREE.Euler | null = null;
+  private posedAt = new THREE.Vector3();
   private vel = { x: 0, y: 0 };
 
   constructor(surface: THREE.Texture, stickers: THREE.Texture) {
@@ -187,6 +190,24 @@ export class MetalCard {
     this.rebuild();
   }
 
+  get dims() {
+    return this.size;
+  }
+
+  /** Hold an exact angle (the cinematic reel drives it); null hands it back to spin and settle. */
+  setPose(rot: THREE.Euler | null, at?: THREE.Vector3) {
+    if (rot) {
+      this.posed = rot;
+      this.posedAt.copy(at ?? new THREE.Vector3());
+      return;
+    }
+    if (this.posed) {
+      this.rot = { x: this.posed.x, y: this.posed.y };
+      this.vel = { x: 0, y: 0 };
+      this.posed = null;
+    }
+  }
+
   /** Corner rounding in world units; 0 is a sharp rectangle. Edges stay square-cut. */
   setCorner(radius: number) {
     if (radius === this.corner) return;
@@ -276,6 +297,11 @@ export class MetalCard {
   }
 
   update(dt: number, time: number) {
+    if (this.posed) {
+      this.group.rotation.copy(this.posed);
+      this.group.position.copy(this.posedAt);
+      return;
+    }
     if (!this.dragging) {
       this.rot.x += this.vel.x * dt;
       this.rot.y += this.vel.y * dt;

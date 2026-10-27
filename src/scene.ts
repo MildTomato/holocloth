@@ -15,6 +15,8 @@ import { BAKED_POSE } from './bakedPose.ts';
 import { gridSvg, growthSvg, barsSvg, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
 import { MetalCard } from './card.ts';
+import { nextShot, shotCamera, shotLight, shotPose, type Shot } from './cinematic.ts';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { HandTracker, type HandsFrame } from './handTracker.ts';
 import type { TrackerStatus } from './cameraTracker.ts';
 import { FaceCollider } from './faceCollider.ts';
@@ -31,8 +33,18 @@ export interface HoloParams {
   hands: boolean;
   /** Flag / Poster / Original / Face / Card */
   mode: string;
+  /** the card's cinematic reel: cuts between raking shots with a light sweep */
+  cinematic: boolean;
   /** the metal card: linework printed or etched, and its corners */
-  card: { ink: string; etchDepth: number; etchBevel: number; corner: number };
+  card: {
+    ink: string;
+    etchDepth: number;
+    etchBevel: number;
+    corner: number;
+    /** roughly how long each cinematic shot holds (s), and how dramatic its light is */
+    shotLength: number;
+    drama: number;
+  };
   physics: {
     viscosity: number;
     stiffness: number;
@@ -186,6 +198,21 @@ export class HoloApp {
   private revealed = false;
   private cardDragId: number | null = null;
   private cardLast = { x: 0, y: 0, t: 0 };
+  /** the card's cinematic reel: the shot on screen, and the camera to go back to */
+  private cine: {
+    shot: Shot | null;
+    t0: number;
+    saved: { position: THREE.Vector3; target: THREE.Vector3 };
+  } | null = null;
+  private cinePose = new THREE.Euler();
+  private cinePos = new THREE.Vector3();
+  private cineFocus = new THREE.Vector3();
+  private shotLength = 2.2;
+  /** 0..1: how dark the room goes and how hot the strip light is while the reel runs */
+  private drama = 0.7;
+  /** the reel's strip light, placed per shot so its reflection sweeps the face */
+  private cineLight: THREE.RectAreaLight | null = null;
+  private rectLightsReady = false;
   private clothGeometry!: THREE.BufferGeometry;
   private holoUniforms: HoloUniforms;
   private holoMaterial: THREE.MeshPhysicalMaterial;
@@ -411,6 +438,8 @@ export class HoloApp {
       this.card.setEtch(p.card.ink, p.card.etchDepth, p.card.etchBevel);
       this.card.setCorner(p.card.corner);
     }
+    this.drama = p.card?.drama ?? 0.7;
+    this.setCinematic(p.mode === 'Card' && !!p.cinematic, p.card?.shotLength ?? 2.2);
     this.faceCollider.depth = p.physics.faceDepth;
     if (p.performance !== this.perfProfile) this.applyPerfProfile(p.performance);
     const m = this.holoMaterial;
@@ -707,6 +736,104 @@ export class HoloApp {
     this.card.group.visible = this.revealed && this.cardMode;
   }
 
+  /**
+   * The card's cinematic reel: hold a shot, drifting the card so light
+   * sweeps the face, then cut — instantly — to the next. The camera is
+   * driven while it runs and handed back where it was after.
+   */
+  private setCinematic(on: boolean, length: number) {
+    this.shotLength = length;
+    if (on === !!this.cine) return;
+    if (on) {
+      this.cine = {
+        shot: null,
+        t0: 0,
+        saved: { position: this.camera.position.clone(), target: this.controls.target.clone() },
+      };
+      this.controls.enabled = false;
+      if (!this.rectLightsReady) {
+        RectAreaLightUniformsLib.init();
+        this.rectLightsReady = true;
+      }
+      this.cineLight = new THREE.RectAreaLight(0xffffff, 1, 1, 1);
+      this.scene.add(this.cineLight);
+      this.cutToNextShot();
+    } else {
+      const { saved } = this.cine!;
+      this.cine = null;
+      this.card.setPose(null);
+      if (this.cineLight) {
+        this.scene.remove(this.cineLight);
+        this.cineLight.dispose();
+        this.cineLight = null;
+      }
+      this.camera.up.set(0, 1, 0);
+      if (this.params) {
+        const r = this.params.render;
+        this.scene.environmentIntensity = r.environment;
+        this.dofPass.enabled = r.dof;
+        this.dofPass.setParams(r.dofAperture * 1e-2, r.dofBlur, r.dofRange * 0.5);
+      }
+      this.camera.position.copy(saved.position);
+      this.controls.target.copy(saved.target);
+      this.controls.enabled = true;
+      this.controls.update();
+    }
+  }
+
+  private cutToNextShot() {
+    const c = this.cine!;
+    const { w, h } = this.card.dims;
+    c.shot = nextShot(w, h, this.shotLength, c.shot ?? undefined);
+    c.t0 = this.elapsed;
+    const { position, target, up } = shotCamera(c.shot);
+    this.camera.position.copy(position);
+    this.controls.target.copy(target);
+    this.camera.up.copy(up); // dutch tilt
+    this.camera.lookAt(target);
+    // the strip light where the face mirrors it into this camera mid-shot,
+    // lying across the way the highlight travels
+    const light = this.cineLight;
+    if (light) {
+      const l = shotLight(c.shot, position);
+      light.position.copy(l.position);
+      light.up.copy(l.up);
+      light.lookAt(l.target);
+      const across = c.shot.sweep === 'across';
+      light.width = across ? 0.45 : 4;
+      light.height = across ? 4 : 0.45;
+    }
+    this.runCinematic();
+  }
+
+  private runCinematic() {
+    const c = this.cine!;
+    const shot = c.shot!;
+    const t = this.elapsed - c.t0;
+    if (t >= shot.duration) {
+      this.cutToNextShot();
+      return;
+    }
+    const f = t / shot.duration;
+    shotPose(shot, f, this.cinePose, this.cinePos);
+    this.card.setPose(this.cinePose, this.cinePos);
+    this.cineFocus.copy(shot.focus).applyEuler(this.cinePose).add(this.cinePos);
+    // depth of field on the framed spot. The sharp zone scales with the shot
+    // distance so it holds the spot and its surroundings; past it, blur
+    // builds gradually (full only a quarter of the distance further out),
+    // to a modest maximum — never a thin sharp strip with the rest smeared
+    const focusDist = this.camera.position.distanceTo(this.cineFocus);
+    const maxBlur = (0.01 + 0.02 * this.drama) * (shot.kind === 'wide' ? 0.5 : 1);
+    this.dofPass.enabled = true;
+    this.dofPass.setParams(maxBlur / 0.25, maxBlur, focusDist * 0.15);
+    this.dofPass.setFocus(focusDist);
+    // drama: dim the room so the sweep is the star, and push the light
+    if (this.params) {
+      this.scene.environmentIntensity = this.params.render.environment * (1 - 0.78 * this.drama);
+    }
+    if (this.cineLight) this.cineLight.intensity = 6 + 34 * this.drama;
+  }
+
   /** Any part of the card under the pointer — for spinning it. */
   private raycastCard(): THREE.Intersection | null {
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
@@ -996,6 +1123,11 @@ export class HoloApp {
     }
     // Space held: step aside so OrbitControls pans with the left button
     if (this.spaceHeld) return;
+    // the reel is running: a click cuts to the next shot
+    if (this.cine) {
+      this.cutToNextShot();
+      return;
+    }
     const hit = this.raycastCloth();
     if (!hit) {
       if (this.cardMode) this.startCardSpin(e); // back or edge of the card
@@ -1147,7 +1279,10 @@ export class HoloApp {
       this.surface.redrawStickers();
     }
 
-    if (this.cardMode) this.card.update(dt, this.elapsed);
+    if (this.cardMode) {
+      if (this.cine) this.runCinematic();
+      this.card.update(dt, this.elapsed);
+    }
     if (this.params && !this.cardMode) {
       const face = this.faceTracker?.poll();
       if (face) this.faceCollider.update(face);
@@ -1194,7 +1329,8 @@ export class HoloApp {
       }
     }
 
-    this.controls.update();
+    // the reel places the camera itself; damped controls would ease its cuts
+    if (!this.cine) this.controls.update();
     this.composer.render();
   };
 
