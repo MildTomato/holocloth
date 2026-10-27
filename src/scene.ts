@@ -12,8 +12,9 @@ import { SurfaceLayer, type DecalItem } from './decals.ts';
 import { normalMapFromImage } from './textures.ts';
 import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
-import { gridSvg, growthSvg, loadImage, fetchDataUrl } from './gridArt.ts';
+import { gridSvg, growthSvg, barsSvg, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
+import { MetalCard, CARD_FRONT } from './card.ts';
 import { HandTracker, type HandsFrame } from './handTracker.ts';
 import type { TrackerStatus } from './cameraTracker.ts';
 import { FaceCollider } from './faceCollider.ts';
@@ -28,6 +29,8 @@ export interface HoloParams {
   performance: string;
   /** webcam hands hold the poster's corners */
   hands: boolean;
+  /** Flag / Poster / Original / Face / Card */
+  mode: string;
   physics: {
     viscosity: number;
     stiffness: number;
@@ -176,6 +179,11 @@ export class HoloApp {
   private cavityAttr!: THREE.BufferAttribute;
   private sim!: ClothSim;
   private clothMesh: THREE.Mesh;
+  private card: MetalCard;
+  private cardMode = false;
+  private revealed = false;
+  private cardDragId: number | null = null;
+  private cardLast = { x: 0, y: 0, t: 0 };
   private clothGeometry!: THREE.BufferGeometry;
   private holoUniforms: HoloUniforms;
   private holoMaterial: THREE.MeshPhysicalMaterial;
@@ -280,6 +288,11 @@ export class HoloApp {
     this.surface.texture.anisotropy = maxAniso;
     this.surface.stickerTexture.anisotropy = maxAniso;
 
+    // the artwork as a metal card (Card mode), sized with the cloth
+    this.card = new MetalCard(this.surface.texture, this.surface.stickerTexture);
+    this.scene.add(this.card.group);
+    this.card.setDetail(this.holoMaterial.normalMap, this.holoMaterial.roughnessMap);
+
     this.clothMesh = new THREE.Mesh(undefined, this.holoMaterial);
     this.clothMesh.frustumCulled = false;
     // hidden until the app has loaded its assets and calls reveal()
@@ -344,6 +357,7 @@ export class HoloApp {
     const segX = aspect >= 1 ? segs : Math.max(10, Math.round(segs * aspect));
     const segY = aspect >= 1 ? Math.max(10, Math.round(segs / aspect)) : segs;
     this.sim = new ClothSim(w, h, segX, segY);
+    this.card.setSize(w, h);
     // a fresh sim starts free-floating: hold it the way the panel says, or a
     // rebuild (performance switch, new image shape) drops the flag/poster
     if (this.params) {
@@ -390,6 +404,7 @@ export class HoloApp {
     this.sim.setHang(p.physics.hang as HangMode);
     this.setFaceTracking(p.physics.hang === 'Face');
     this.setHandTracking(!!p.hands);
+    this.setCardMode(p.mode === 'Card');
     this.faceCollider.depth = p.physics.faceDepth;
     if (p.performance !== this.perfProfile) this.applyPerfProfile(p.performance);
     const m = this.holoMaterial;
@@ -403,6 +418,7 @@ export class HoloApp {
     m.sheenColor.set(p.material.baseColor).lerp(WHITE, 0.5);
     m.iridescence = p.material.iridescence;
     m.normalScale.set(p.material.bump, p.material.bump);
+    this.card.setBump(p.material.bump);
     if (m.normalMap) m.normalMap.repeat.set(p.material.bumpTiling, p.material.bumpTiling);
     // material.envMapIntensity is ignored when lighting comes from
     // scene.environment — the renderer reads scene.environmentIntensity
@@ -457,12 +473,12 @@ export class HoloApp {
    */
   private updateGridArt(g: HoloParams['grid']) {
     if (!g) return;
-    const generated = g.pattern === 'Generated' || g.pattern === 'Growth';
+    const generated = g.pattern === 'Generated' || g.pattern === 'Growth' || g.pattern === 'Bars';
     const key = g.pattern === 'Generated'
       ? ['Generated', g.rows, g.depth, g.fill, g.endCircles, g.guides, g.seed].join('|')
       : g.pattern === 'Growth'
         ? ['Growth', g.steps, g.guides].join('|')
-        : 'Original';
+        : g.pattern === 'Bars' ? 'Bars' : 'Original';
     if (key === this.gridKey) return;
     const first = this.gridKey === '';
     this.gridKey = key;
@@ -484,7 +500,7 @@ export class HoloApp {
 
   private async generateGridArt(g: HoloParams['grid']) {
     const field = await (this.gridField ??= fetchDataUrl('/artwork/field.png'));
-    const svg = g.pattern === 'Growth'
+    const svg = g.pattern === 'Bars' ? barsSvg(field) : g.pattern === 'Growth'
       ? growthSvg({ rows: g.steps, guides: g.guides }, field)
       : gridSvg({
         rows: g.rows,
@@ -662,7 +678,36 @@ export class HoloApp {
 
   /** Show the cloth once the app's assets are in place. */
   reveal() {
-    this.clothMesh.visible = true;
+    this.revealed = true;
+    this.showMode();
+  }
+
+  /** Card mode swaps the cloth for the metal card; the cloth sim rests meanwhile. */
+  private setCardMode(on: boolean) {
+    if (on === this.cardMode) return;
+    this.cardMode = on;
+    this.showMode();
+  }
+
+  private showMode() {
+    this.clothMesh.visible = this.revealed && !this.cardMode;
+    this.card.group.visible = this.revealed && this.cardMode;
+  }
+
+  /** Any part of the card under the pointer — for spinning it. */
+  private raycastCard(): THREE.Intersection | null {
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    return this.raycaster.intersectObject(this.card.mesh, false)[0] ?? null;
+  }
+
+  private startCardSpin(e: PointerEvent) {
+    if (!this.raycastCard()) return; // empty space: let OrbitControls orbit
+    this.card.dragging = true;
+    this.cardDragId = e.pointerId;
+    this.cardLast = { x: e.clientX, y: e.clientY, t: performance.now() };
+    this.controls.enabled = false;
+    this.renderer.domElement.setPointerCapture(e.pointerId);
+    this.renderer.domElement.style.cursor = 'grabbing';
   }
 
   /** Small data-URL preview of an image, cached per element. */
@@ -764,6 +809,7 @@ export class HoloApp {
     this.holoMaterial.normalMap = tex;
     // map presence changes the shader program
     if (!!old !== !!tex) this.holoMaterial.needsUpdate = true;
+    this.card.setDetail(tex, this.holoMaterial.roughnessMap);
     if (old) old.dispose();
     this.onImagesChanged?.();
   }
@@ -783,6 +829,7 @@ export class HoloApp {
     this.surface.stickerTexture.anisotropy = maxAniso;
     this.holoUniforms.uSurfaceMap.value = this.surface.texture;
     this.holoUniforms.uStickerMap.value = this.surface.stickerTexture;
+    this.card.setTextures(this.surface.texture, this.surface.stickerTexture);
   }
 
   /** Render one frame at high resolution and download it as a PNG. */
@@ -826,6 +873,11 @@ export class HoloApp {
 
   private raycastCloth(): THREE.Intersection | null {
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    if (this.cardMode) {
+      // in Card mode the "surface" is the card's printed face
+      const hit = this.raycaster.intersectObject(this.card.mesh, false)[0];
+      return hit?.face?.materialIndex === CARD_FRONT ? hit : null;
+    }
     this.clothGeometry.computeBoundingSphere();
     const hits = this.raycaster.intersectObject(this.clothMesh, false);
     return hits.length > 0 ? hits[0] : null;
@@ -932,7 +984,10 @@ export class HoloApp {
     // Space held: step aside so OrbitControls pans with the left button
     if (this.spaceHeld) return;
     const hit = this.raycastCloth();
-    if (!hit) return;
+    if (!hit) {
+      if (this.cardMode) this.startCardSpin(e); // back or edge of the card
+      return;
+    }
 
     // stickers peel off on press, ahead of cloth grabbing
     const peeled = hit.uv ? this.surface.stickerAt(hit.uv.x, hit.uv.y) : null;
@@ -942,6 +997,11 @@ export class HoloApp {
       this.controls.enabled = false; // endStickerDrag() turns it back on
       this.onStickerPick(peeled, e);
       this.onImagesChanged?.();
+      return;
+    }
+
+    if (this.cardMode) {
+      this.startCardSpin(e);
       return;
     }
 
@@ -975,6 +1035,14 @@ export class HoloApp {
   };
 
   private onPointerMove = (e: PointerEvent) => {
+    if (this.cardDragId !== null) {
+      if (e.pointerId !== this.cardDragId) return;
+      const now = performance.now();
+      const dt = Math.max(1, now - this.cardLast.t) / 1000;
+      this.card.drag(e.clientX - this.cardLast.x, e.clientY - this.cardLast.y, dt);
+      this.cardLast = { x: e.clientX, y: e.clientY, t: now };
+      return;
+    }
     const active = this.grabbing || this.draggingDecal;
     if (active && e.pointerId !== this.grabPointerId) return;
     this.updatePointer(e);
@@ -997,6 +1065,16 @@ export class HoloApp {
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    if (this.cardDragId !== null && e.pointerId === this.cardDragId) {
+      this.card.dragging = false;
+      this.cardDragId = null;
+      this.controls.enabled = true;
+      if (this.renderer.domElement.hasPointerCapture(e.pointerId)) {
+        this.renderer.domElement.releasePointerCapture(e.pointerId);
+      }
+      this.renderer.domElement.style.cursor = this.hoverCursor;
+      return;
+    }
     if (e.pointerId === this.pickReleaseId) {
       this.pickReleaseId = null;
       this.controls.enabled = true;
@@ -1056,7 +1134,8 @@ export class HoloApp {
       this.surface.redrawStickers();
     }
 
-    if (this.params) {
+    if (this.cardMode) this.card.update(dt, this.elapsed);
+    if (this.params && !this.cardMode) {
       const face = this.faceTracker?.poll();
       if (face) this.faceCollider.update(face);
       if (this.handTracker) this.holdWithHands();
@@ -1065,7 +1144,7 @@ export class HoloApp {
       this.clothGeometry.computeVertexNormals();
     }
 
-    if (this.params?.render.occlusion) {
+    if (this.params?.render.occlusion && !this.cardMode) {
       this.sim.computeCavity(
         this.clothGeometry.attributes.normal.array,
         this.cavityAttr.array as Float32Array,
@@ -1089,7 +1168,7 @@ export class HoloApp {
     // hover cursor feedback (skip while dragging/picking/panning; off on Low)
     if (!this.grabbing && !this.draggingDecal && !this.pickingFocus && !this.spaceHeld &&
         this.perfProfile !== 'Low') {
-      const hit = this.raycastCloth();
+      const hit = this.cardMode ? this.raycastCard() : this.raycastCloth();
       let cursor = 'default';
       if (hit) {
         cursor = this.editMode

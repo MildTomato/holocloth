@@ -184,6 +184,45 @@ export function growthSvg(o: Pick<GridOptions, 'rows' | 'guides'>, fieldDataUrl:
   return pageSvg(growthLinework(o), fieldDataUrl);
 }
 
+/**
+ * Stepped bars: a stack of black bars, each one's top edge stepping down
+ * partway along it. The step slides left by the same amount every row,
+ * and the bars thin evenly toward the bottom, so the steps read as one
+ * diagonal running through the stack. Measured from the reference (in its
+ * pixels, below) and fitted between the margin rule and the right margin,
+ * sitting low on the page with open space above.
+ */
+export function barsLinework(): string {
+  // reference measurements
+  const REF_X0 = 12, REF_X1 = 1838, REF_TOP = 437, REF_PITCH = 99.4;
+  const ROWS = 14;
+  const STEP_START = 1708, STEP_SHIFT = 103.9, STEP_W = 126;
+  const LEFT_H0 = 79, LEFT_H1 = 39, RIGHT_H0 = 44, RIGHT_H1 = 22;
+  // page placement: clear of the rule, bottom of the stack just above "Prototype"
+  const PAGE_X0 = RULE_X + 40, PAGE_X1 = W - RULE_X, PAGE_BOTTOM = RULE_BOTTOM - 120;
+  const k = (PAGE_X1 - PAGE_X0) / (REF_X1 - REF_X0);
+  const refHeight = (ROWS - 1) * REF_PITCH + LEFT_H1;
+  const top0 = PAGE_BOTTOM - refHeight * k;
+  const X = (x: number) => f(PAGE_X0 + (x - REF_X0) * k);
+
+  const out: string[] = [];
+  for (let i = 0; i < ROWS; i++) {
+    const t = i / (ROWS - 1);
+    const left = (LEFT_H0 + (LEFT_H1 - LEFT_H0) * t) * k;
+    const right = (RIGHT_H0 + (RIGHT_H1 - RIGHT_H0) * t) * k;
+    const top = top0 + i * REF_PITCH * k;
+    const bottom = top + left;
+    const s0 = STEP_START - i * STEP_SHIFT;
+    out.push(`<path d="M${X(REF_X0)} ${f(top)} H${X(s0)} L${X(s0 + STEP_W)} ${f(bottom - right)} ` +
+      `H${X(REF_X1)} V${f(bottom)} H${X(REF_X0)} Z" fill="${STROKE}" stroke="none"/>`);
+  }
+  return out.join('\n    ');
+}
+
+export function barsSvg(fieldDataUrl: string): string {
+  return pageSvg(barsLinework(), fieldDataUrl);
+}
+
 function pageSvg(linework: string, fieldDataUrl: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>

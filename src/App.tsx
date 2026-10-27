@@ -50,6 +50,8 @@ interface PresetBundle {
 
 /** mode -> how the cloth is held; the Physics sliders start from these */
 const MODE_VALUES: Record<string, Record<string, unknown>> = {
+  // the artwork as a rigid metal card; the cloth (and its physics) rests
+  Card: {},
   Flag: {
     hang: 'Flag',
     pinSpread: 1,
@@ -379,7 +381,7 @@ export default function App() {
       },
       mode: {
         type: 'select' as const,
-        options: ['Flag', 'Poster', 'Original', 'Face'],
+        options: ['Flag', 'Poster', 'Original', 'Face', 'Card'],
         default: 'Flag',
       },
       hands: false,
@@ -415,7 +417,7 @@ export default function App() {
       grid: {
         pattern: {
           type: 'select' as const,
-          options: ['Original', 'Generated', 'Growth'],
+          options: ['Original', 'Generated', 'Growth', 'Bars'],
           default: 'Growth',
         },
         steps: [6, 2, 8, 1],
