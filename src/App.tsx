@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useDialKitController, DialRoot, DialStore } from 'dialkit';
+import { useDialKitController, DialRoot, DialStore, type DialConfig } from 'dialkit';
 import { HoloApp, type HoloParams, type ImagesState } from './scene.ts';
 import { STICKER_SHEET } from './stickers.ts';
+import { withUrlDefaults, panelDefaults, flattenValues, writeUrl } from './urlState.ts';
 
 const PERFORMANCE_KEY = 'holocloth.performance';
 
@@ -366,6 +367,158 @@ function loadImageFile(file: File, onLoad: (img: HTMLImageElement) => void) {
   img.src = url;
 }
 
+/**
+ * The panel. Its defaults can be overridden from the URL (see urlState.ts),
+ * and every changed value is written back there, so a link restores a look.
+ */
+const BASE_PANEL = {
+  performance: {
+    type: 'select' as const,
+    options: ['High', 'Medium', 'Low'],
+    default: savedPerformance(),
+  },
+  mode: {
+    type: 'select' as const,
+    options: ['Flag', 'Poster', 'Original', 'Face', 'Card'],
+    default: 'Card',
+  },
+  hands: false,
+  cinematic: false,
+  stickers: {
+    clearStickers: { type: 'action' as const, label: 'Clear stickers' },
+  },
+  card: {
+    ink: {
+      type: 'select' as const,
+      options: ['Printed', 'Etched', 'Etched + filled'],
+      default: 'Etched',
+    },
+    etchDepth: [0.15, 0, 1, 0.01],
+    etchBevel: [0.5, 0.5, 8, 0.1],
+    corner: [0.04, 0, 0.3, 0.005],
+    shotLength: [2.2, 0.8, 6, 0.1],
+    drama: [0.7, 0, 1, 0.01],
+  },
+  material: {
+    preset: {
+      type: 'select' as const,
+      options: ['Holo', 'Chrome', 'Black Cloth'],
+      default: 'Holo',
+    },
+    finish: {
+      type: 'select' as const,
+      options: ['Glossy', 'Satin', 'Matte'],
+      default: 'Matte',
+    },
+    baseColor: '#20242d',
+    holoIntensity: [1.13, 0, 4, 0.01],
+    holoScale: [400, 8, 400, 1],
+    bandFreq: [2.7, 0.2, 10, 0.05],
+    saturation: [0.37, 0, 1, 0.01],
+    hueShift: [0.14, 0, 1, 0.01],
+    sparkle: [0.73, 0, 2, 0.01],
+    specTint: [0.33, 0, 1, 0.01],
+    iridescence: [0.81, 0, 1, 0.01],
+    roughness: [0.62, 0, 1, 0.01],
+    metalness: [0.93, 0, 1, 0.01],
+    clearcoat: [0.53, 0, 1, 0.01],
+    coatRoughness: [0.7, 0, 1, 0.01],
+    sheen: [0.7, 0, 1, 0.01],
+    bump: [0.5, 0, 3, 0.01],
+    bumpTiling: [3, 1, 12, 0.5],
+    uploadBump: { type: 'action' as const, label: 'Upload bump map' },
+  },
+  grid: {
+    pattern: {
+      type: 'select' as const,
+      options: ['Original', 'Generated', 'Growth', 'Bars'],
+      default: 'Growth',
+    },
+    steps: [6, 2, 8, 1],
+    rows: [2, 1, 6, 1],
+    depth: [1, 0, 3, 1],
+    fill: [0.6, 0, 1, 0.01],
+    endCircles: true,
+    guides: true,
+    seed: [7, 1, 999, 1],
+    shuffle: { type: 'action' as const, label: 'Shuffle grid' },
+  },
+  physics: {
+    _collapsed: true,
+    viscosity: [0.25, 0.0, 0.6, 0.005],
+    stiffness: [1, 0.2, 1, 0.01],
+    iterations: [14, 1, 14, 1],
+    smoothing: [0.14, 0, 0.3, 0.005],
+    grabRadius: [0.27, 0.05, 1.2, 0.01],
+    hang: {
+      type: 'select' as const,
+      options: ['Free', 'Two pins', 'Top edge', 'Flag', 'Face'],
+      default: 'Flag',
+    },
+    pinSpread: [1, 0.6, 1, 0.005],
+    gravity: [4.5, 0, 40, 0.1],
+    wind: [22, 0, 60, 0.5],
+    windDir: [83, -180, 180, 1],
+    flutter: [1.2, 0, 3, 0.01],
+    gust: [0.6, 0, 1, 0.01],
+    dynamicWind: true,
+    bend: [1, 0, 1, 0.01],
+    compress: [1, 0, 1, 0.01],
+    selfCollide: false,
+    stretch: [1, 0, 1, 0.01],
+    faceDepth: [0.5, 0, 1.5, 0.01],
+  },
+  images: {
+    _collapsed: true,
+    useImage: false,
+    edit: false,
+    scale: [0.46, 0.02, 2.5, 0.01],
+    rotation: [0, -180, 180, 1],
+    opacity: [1, 0, 1, 0.01],
+    cornerRadius: [0, 0, 1, 0.01],
+    addImage: { type: 'action' as const, label: 'Add image / SVG' },
+    makeCloth: { type: 'action' as const, label: 'Image as cloth…' },
+    clearImages: { type: 'action' as const, label: 'Clear images' },
+  },
+  render: {
+    _collapsed: true,
+    background: { type: 'color' as const, default: RENDER_DEFAULTS.background },
+    exposure: [RENDER_DEFAULTS.exposure, 0.2, 2.5, 0.01],
+    environment: [RENDER_DEFAULTS.environment, 0, 3, 0.01],
+    bloom: [RENDER_DEFAULTS.bloom, 0, 1.2, 0.01],
+    bloomThreshold: [RENDER_DEFAULTS.bloomThreshold, 0, 2, 0.01],
+    noise: [RENDER_DEFAULTS.noise, 0, 0.6, 0.005],
+    toneMapping: {
+      type: 'select' as const,
+      options: ['AgX', 'ACES', 'Neutral'],
+      default: RENDER_DEFAULTS.toneMapping,
+    },
+    occlusion: RENDER_DEFAULTS.occlusion,
+    occlusionStrength: [RENDER_DEFAULTS.occlusionStrength, 0, 1, 0.01],
+    dof: RENDER_DEFAULTS.dof,
+    dofAperture: [RENDER_DEFAULTS.dofAperture, 1, 150, 1],
+    dofBlur: [RENDER_DEFAULTS.dofBlur, 0, 0.15, 0.001],
+    dofRange: [RENDER_DEFAULTS.dofRange, 0, 3, 0.01],
+    pickFocus: { type: 'action' as const, label: 'Pick focus point' },
+    autoFocus: { type: 'action' as const, label: 'Auto focus' },
+  },
+  exportPNG: { type: 'action' as const, label: 'Export PNG' },
+  exportPNGClear: { type: 'action' as const, label: 'Export PNG (no background)' },
+  resetCloth: { type: 'action' as const, label: 'Reset cloth' },
+  poke: { type: 'action' as const, label: 'Poke' },
+} satisfies DialConfig;
+
+// a link's mode brings its hang preset with it; the link's own values win
+const PANEL = withUrlDefaults(BASE_PANEL, (url) => {
+  const bundle = typeof url.mode === 'string' ? MODE_VALUES[url.mode] : undefined;
+  if (!bundle) return {};
+  return Object.fromEntries(
+    Object.entries(bundle).map(([k, v]) => [`physics.${k}`, v as string | number | boolean]),
+  );
+});
+/** the panel's own defaults: the URL only carries what differs from these */
+const PANEL_DEFAULTS = panelDefaults(BASE_PANEL);
+
 export default function App() {
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<HoloApp | null>(null);
@@ -375,142 +528,7 @@ export default function App() {
 
   const dial = useDialKitController(
     'Holocloth',
-    {
-      performance: {
-        type: 'select' as const,
-        options: ['High', 'Medium', 'Low'],
-        default: savedPerformance(),
-      },
-      mode: {
-        type: 'select' as const,
-        options: ['Flag', 'Poster', 'Original', 'Face', 'Card'],
-        default: 'Card',
-      },
-      hands: false,
-      cinematic: false,
-      stickers: {
-        clearStickers: { type: 'action' as const, label: 'Clear stickers' },
-      },
-      card: {
-        ink: {
-          type: 'select' as const,
-          options: ['Printed', 'Etched', 'Etched + filled'],
-          default: 'Etched',
-        },
-        etchDepth: [0.15, 0, 1, 0.01],
-        etchBevel: [0.5, 0.5, 8, 0.1],
-        corner: [0.04, 0, 0.3, 0.005],
-        shotLength: [2.2, 0.8, 6, 0.1],
-        drama: [0.7, 0, 1, 0.01],
-      },
-      material: {
-        preset: {
-          type: 'select' as const,
-          options: ['Holo', 'Chrome', 'Black Cloth'],
-          default: 'Holo',
-        },
-        finish: {
-          type: 'select' as const,
-          options: ['Glossy', 'Satin', 'Matte'],
-          default: 'Matte',
-        },
-        baseColor: '#20242d',
-        holoIntensity: [1.13, 0, 4, 0.01],
-        holoScale: [400, 8, 400, 1],
-        bandFreq: [2.7, 0.2, 10, 0.05],
-        saturation: [0.37, 0, 1, 0.01],
-        hueShift: [0.14, 0, 1, 0.01],
-        sparkle: [0.73, 0, 2, 0.01],
-        specTint: [0.33, 0, 1, 0.01],
-        iridescence: [0.81, 0, 1, 0.01],
-        roughness: [0.62, 0, 1, 0.01],
-        metalness: [0.93, 0, 1, 0.01],
-        clearcoat: [0.53, 0, 1, 0.01],
-        coatRoughness: [0.7, 0, 1, 0.01],
-        sheen: [0.7, 0, 1, 0.01],
-        bump: [0.5, 0, 3, 0.01],
-        bumpTiling: [3, 1, 12, 0.5],
-        uploadBump: { type: 'action' as const, label: 'Upload bump map' },
-      },
-      grid: {
-        pattern: {
-          type: 'select' as const,
-          options: ['Original', 'Generated', 'Growth', 'Bars'],
-          default: 'Growth',
-        },
-        steps: [6, 2, 8, 1],
-        rows: [2, 1, 6, 1],
-        depth: [1, 0, 3, 1],
-        fill: [0.6, 0, 1, 0.01],
-        endCircles: true,
-        guides: true,
-        seed: [7, 1, 999, 1],
-        shuffle: { type: 'action' as const, label: 'Shuffle grid' },
-      },
-      physics: {
-        _collapsed: true,
-        viscosity: [0.25, 0.0, 0.6, 0.005],
-        stiffness: [1, 0.2, 1, 0.01],
-        iterations: [14, 1, 14, 1],
-        smoothing: [0.14, 0, 0.3, 0.005],
-        grabRadius: [0.27, 0.05, 1.2, 0.01],
-        hang: {
-          type: 'select' as const,
-          options: ['Free', 'Two pins', 'Top edge', 'Flag', 'Face'],
-          default: 'Flag',
-        },
-        pinSpread: [1, 0.6, 1, 0.005],
-        gravity: [4.5, 0, 40, 0.1],
-        wind: [22, 0, 60, 0.5],
-        windDir: [83, -180, 180, 1],
-        flutter: [1.2, 0, 3, 0.01],
-        gust: [0.6, 0, 1, 0.01],
-        dynamicWind: true,
-        bend: [1, 0, 1, 0.01],
-        compress: [1, 0, 1, 0.01],
-        selfCollide: false,
-        stretch: [1, 0, 1, 0.01],
-        faceDepth: [0.5, 0, 1.5, 0.01],
-      },
-      images: {
-        _collapsed: true,
-        useImage: false,
-        edit: false,
-        scale: [0.46, 0.02, 2.5, 0.01],
-        rotation: [0, -180, 180, 1],
-        opacity: [1, 0, 1, 0.01],
-        cornerRadius: [0, 0, 1, 0.01],
-        addImage: { type: 'action' as const, label: 'Add image / SVG' },
-        makeCloth: { type: 'action' as const, label: 'Image as cloth…' },
-        clearImages: { type: 'action' as const, label: 'Clear images' },
-      },
-      render: {
-        _collapsed: true,
-        background: { type: 'color' as const, default: RENDER_DEFAULTS.background },
-        exposure: [RENDER_DEFAULTS.exposure, 0.2, 2.5, 0.01],
-        environment: [RENDER_DEFAULTS.environment, 0, 3, 0.01],
-        bloom: [RENDER_DEFAULTS.bloom, 0, 1.2, 0.01],
-        bloomThreshold: [RENDER_DEFAULTS.bloomThreshold, 0, 2, 0.01],
-        noise: [RENDER_DEFAULTS.noise, 0, 0.6, 0.005],
-        toneMapping: {
-          type: 'select' as const,
-          options: ['AgX', 'ACES', 'Neutral'],
-          default: RENDER_DEFAULTS.toneMapping,
-        },
-        occlusion: RENDER_DEFAULTS.occlusion,
-        occlusionStrength: [RENDER_DEFAULTS.occlusionStrength, 0, 1, 0.01],
-        dof: RENDER_DEFAULTS.dof,
-        dofAperture: [RENDER_DEFAULTS.dofAperture, 1, 150, 1],
-        dofBlur: [RENDER_DEFAULTS.dofBlur, 0, 0.15, 0.001],
-        dofRange: [RENDER_DEFAULTS.dofRange, 0, 3, 0.01],
-        pickFocus: { type: 'action' as const, label: 'Pick focus point' },
-        autoFocus: { type: 'action' as const, label: 'Auto focus' },
-      },
-      exportPNG: { type: 'action' as const, label: 'Export PNG' },
-      exportPNGClear: { type: 'action' as const, label: 'Export PNG (no background)' },
-      resetCloth: { type: 'action' as const, label: 'Reset cloth' },
-      poke: { type: 'action' as const, label: 'Poke' },
-    },
+    PANEL,
     {
       id: 'holocloth',
       onAction: (path: string) => {
@@ -685,6 +703,15 @@ export default function App() {
   const skipFinish = useRef(true);
 
   // preset picks a whole material bundle
+  // the URL is outside React: keep it in step with the panel, a beat behind so
+  // dragging a slider doesn't rewrite the address every frame
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      writeUrl(flattenValues(params as unknown as Record<string, unknown>), PANEL_DEFAULTS);
+    }, 150);
+    return () => window.clearTimeout(t);
+  }, [params]);
+
   // localStorage is outside React: keep the saved profile in step with the panel
   const performance = params.performance;
   useEffect(() => {
