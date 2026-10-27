@@ -15,7 +15,9 @@ import { BAKED_POSE } from './bakedPose.ts';
 import { gridSvg, growthSvg, barsSvg, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
 import { MetalCard } from './card.ts';
-import { nextShot, shotCamera, shotLight, shotPose, type Shot } from './cinematic.ts';
+import {
+  nextShot, shotCamera, shotLight, shotPose, nextClothShot, type Shot, type ClothShot,
+} from './cinematic.ts';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { HandTracker, type HandsFrame } from './handTracker.ts';
 import type { TrackerStatus } from './cameraTracker.ts';
@@ -200,7 +202,12 @@ export class HoloApp {
   private cardLast = { x: 0, y: 0, t: 0 };
   /** the card's cinematic reel: the shot on screen, and the camera to go back to */
   private cine: {
+    /** a card shot, in Card mode */
     shot: Shot | null;
+    /** a cloth shot, in the other modes */
+    cloth: ClothShot | null;
+    /** which the current shot is of, to cut when the mode changes */
+    forCard: boolean;
     t0: number;
     saved: { position: THREE.Vector3; target: THREE.Vector3 };
   } | null = null;
@@ -439,7 +446,7 @@ export class HoloApp {
       this.card.setCorner(p.card.corner);
     }
     this.drama = p.card?.drama ?? 0.7;
-    this.setCinematic(p.mode === 'Card' && !!p.cinematic, p.card?.shotLength ?? 2.2);
+    this.setCinematic(!!p.cinematic, p.card?.shotLength ?? 2.2);
     this.faceCollider.depth = p.physics.faceDepth;
     if (p.performance !== this.perfProfile) this.applyPerfProfile(p.performance);
     const m = this.holoMaterial;
@@ -747,6 +754,8 @@ export class HoloApp {
     if (on) {
       this.cine = {
         shot: null,
+        cloth: null,
+        forCard: this.cardMode,
         t0: 0,
         saved: { position: this.camera.position.clone(), target: this.controls.target.clone() },
       };
@@ -781,49 +790,108 @@ export class HoloApp {
     }
   }
 
+  /** Hard cut to a new shot: of the card in Card mode, otherwise of the cloth. */
   private cutToNextShot() {
     const c = this.cine!;
-    const { w, h } = this.card.dims;
-    c.shot = nextShot(w, h, this.shotLength, c.shot ?? undefined);
     c.t0 = this.elapsed;
-    const { position, target, up } = shotCamera(c.shot);
-    this.camera.position.copy(position);
-    this.controls.target.copy(target);
-    this.camera.up.copy(up); // dutch tilt
-    this.camera.lookAt(target);
-    // the strip light where the face mirrors it into this camera mid-shot,
-    // lying across the way the highlight travels
+    c.forCard = this.cardMode;
     const light = this.cineLight;
-    if (light) {
-      const l = shotLight(c.shot, position);
-      light.position.copy(l.position);
-      light.up.copy(l.up);
-      light.lookAt(l.target);
-      const across = c.shot.sweep === 'across';
-      light.width = across ? 0.45 : 4;
-      light.height = across ? 4 : 0.45;
+    if (this.cardMode) {
+      c.cloth = null;
+      const { w, h } = this.card.dims;
+      c.shot = nextShot(w, h, this.shotLength, c.shot ?? undefined);
+      const { position, target, up } = shotCamera(c.shot);
+      this.placeCamera(position, target, up);
+      // the strip light where the face mirrors it into this camera mid-shot,
+      // lying across the way the highlight travels
+      if (light) {
+        const l = shotLight(c.shot, position);
+        light.position.copy(l.position);
+        light.up.copy(l.up);
+        light.lookAt(l.target);
+        const across = c.shot.sweep === 'across';
+        light.width = across ? 0.45 : 4;
+        light.height = across ? 4 : 0.45;
+      }
+    } else {
+      // card shots are for the card: release it if it was posed
+      this.card.setPose(null);
+      c.shot = null;
+      const { point, normal } = this.clothSpot();
+      c.cloth = nextClothShot(point, normal, this.shotLength, c.cloth ?? undefined);
+      this.placeCamera(c.cloth.camFrom, c.cloth.target, c.cloth.up);
+      if (light) {
+        light.width = 0.45;
+        light.height = 4;
+      }
     }
     this.runCinematic();
   }
 
+  private placeCamera(position: THREE.Vector3, target: THREE.Vector3, up: THREE.Vector3) {
+    this.camera.position.copy(position);
+    this.controls.target.copy(target);
+    this.camera.up.copy(up); // dutch tilt
+    this.camera.lookAt(target);
+  }
+
+  /** A spot on the sheet to frame — away from the edges — and its surface normal. */
+  private clothSpot() {
+    const s = this.sim;
+    const r = Math.floor(THREE.MathUtils.randFloat(0.15, 0.85) * (s.rows - 1));
+    const col = Math.floor(THREE.MathUtils.randFloat(0.15, 0.85) * (s.cols - 1));
+    const i = (r * s.cols + col) * 3;
+    const p = s.positions;
+    const n = this.clothGeometry.attributes.normal.array;
+    return {
+      point: new THREE.Vector3(p[i], p[i + 1], p[i + 2]),
+      normal: new THREE.Vector3(n[i], n[i + 1], n[i + 2]).normalize(),
+    };
+  }
+
   private runCinematic() {
     const c = this.cine!;
-    const shot = c.shot!;
-    const t = this.elapsed - c.t0;
-    if (t >= shot.duration) {
+    // switched between card and cloth mid-reel: cut to a shot of what's showing
+    if (c.forCard !== this.cardMode) {
       this.cutToNextShot();
       return;
     }
-    const f = t / shot.duration;
-    shotPose(shot, f, this.cinePose, this.cinePos);
-    this.card.setPose(this.cinePose, this.cinePos);
-    this.cineFocus.copy(shot.focus).applyEuler(this.cinePose).add(this.cinePos);
+    const duration = c.shot?.duration ?? c.cloth?.duration ?? 0;
+    const t = this.elapsed - c.t0;
+    if (t >= duration) {
+      this.cutToNextShot();
+      return;
+    }
+    const f = t / duration;
+    let kind: string;
+    if (c.shot) {
+      const shot = c.shot;
+      kind = shot.kind;
+      shotPose(shot, f, this.cinePose, this.cinePos);
+      this.card.setPose(this.cinePose, this.cinePos);
+      this.cineFocus.copy(shot.focus).applyEuler(this.cinePose).add(this.cinePos);
+    } else {
+      // the cloth moves by itself: glide the camera and carry the light across
+      const shot = c.cloth!;
+      kind = shot.kind;
+      const ease = f * f * (3 - 2 * f);
+      this.camera.position.lerpVectors(shot.camFrom, shot.camTo, ease);
+      this.camera.up.copy(shot.up);
+      this.camera.lookAt(shot.target);
+      this.cineFocus.copy(shot.target);
+      const light = this.cineLight;
+      if (light) {
+        light.position.lerpVectors(shot.lightFrom, shot.lightTo, f);
+        light.up.copy(shot.lightUp);
+        light.lookAt(shot.target);
+      }
+    }
     // depth of field on the framed spot. The sharp zone scales with the shot
     // distance so it holds the spot and its surroundings; past it, blur
     // builds gradually (full only a quarter of the distance further out),
     // to a modest maximum — never a thin sharp strip with the rest smeared
     const focusDist = this.camera.position.distanceTo(this.cineFocus);
-    const maxBlur = (0.01 + 0.02 * this.drama) * (shot.kind === 'wide' ? 0.5 : 1);
+    const maxBlur = (0.01 + 0.02 * this.drama) * (kind === 'wide' ? 0.5 : 1);
     this.dofPass.enabled = true;
     this.dofPass.setParams(maxBlur / 0.25, maxBlur, focusDist * 0.15);
     this.dofPass.setFocus(focusDist);
@@ -1279,10 +1347,8 @@ export class HoloApp {
       this.surface.redrawStickers();
     }
 
-    if (this.cardMode) {
-      if (this.cine) this.runCinematic();
-      this.card.update(dt, this.elapsed);
-    }
+    if (this.cine) this.runCinematic();
+    if (this.cardMode) this.card.update(dt, this.elapsed);
     if (this.params && !this.cardMode) {
       const face = this.faceTracker?.poll();
       if (face) this.faceCollider.update(face);

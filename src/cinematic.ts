@@ -123,3 +123,76 @@ export function shotCamera(shot: Shot) {
   const up = new THREE.Vector3(Math.sin(shot.roll), Math.cos(shot.roll), 0).applyEuler(shot.rot);
   return { position: target.clone().addScaledVector(dir, shot.dist), target, up };
 }
+
+/**
+ * A shot of the cloth, which moves by itself, so here the camera and light
+ * do the moving: the camera glides (a slow orbit plus a push in) on a spot
+ * of the sheet while the strip light travels across, so its highlight runs
+ * over the folds. Always from the front, where the artwork is.
+ */
+export interface ClothShot {
+  kind: 'close' | 'medium' | 'wide';
+  target: THREE.Vector3;
+  camFrom: THREE.Vector3;
+  camTo: THREE.Vector3;
+  up: THREE.Vector3;
+  lightFrom: THREE.Vector3;
+  lightTo: THREE.Vector3;
+  /** the strip's long side, across the highlight's travel */
+  lightUp: THREE.Vector3;
+  duration: number;
+}
+
+export function nextClothShot(
+  point: THREE.Vector3,
+  normal: THREE.Vector3,
+  length: number,
+  prev?: ClothShot,
+): ClothShot {
+  let kind: ClothShot['kind'];
+  do {
+    const r = Math.random();
+    kind = r < 0.45 ? 'close' : r < 0.8 ? 'medium' : 'wide';
+  } while (kind === prev?.kind);
+  const dist = { close: rand(1.1, 1.7), medium: rand(2.3, 3.1), wide: rand(4.2, 5.0) }[kind];
+
+  // the front: the artwork faces +z
+  const n = normal.clone();
+  if (n.z < 0) n.negate();
+  // a frame around the spot's normal, to rake the camera off it
+  const side = new THREE.Vector3(0, 1, 0).cross(n).normalize();
+  const lift = n.clone().cross(side).normalize();
+  const az = either() * rand(0.3, 0.9);
+  const el = rand(-0.6, 0.6);
+  const view = n.clone().multiplyScalar(Math.cos(az) * Math.cos(el))
+    .addScaledVector(side, Math.sin(az) * Math.cos(el))
+    .addScaledVector(lift, Math.sin(el))
+    .normalize();
+
+  const camFrom = point.clone().addScaledVector(view, dist);
+  // glide: orbit ~10° around the spot and push in 10-22%
+  const orbit = view.clone().applyAxisAngle(lift, either() * rand(0.12, 0.2));
+  const camTo = point.clone().addScaledVector(orbit, dist * rand(0.78, 0.9));
+
+  // light: start where the sheet mirrors it into the camera, then travel
+  // across, so the highlight runs over the folds
+  const toLight = view.clone().negate().reflect(n);
+  const sweepAxis = Math.random() < 0.7 ? lift : side;
+  const swing = either() * rand(0.3, 0.45);
+  const lightFrom = point.clone().addScaledVector(toLight.clone().applyAxisAngle(sweepAxis, -swing), 3.2);
+  const lightTo = point.clone().addScaledVector(toLight.clone().applyAxisAngle(sweepAxis, swing), 3.2);
+
+  const roll = rand(-0.45, 0.45);
+  const up = lift.clone().applyAxisAngle(view, roll);
+  return {
+    kind,
+    target: point.clone(),
+    camFrom,
+    camTo,
+    up,
+    lightFrom,
+    lightTo,
+    lightUp: sweepAxis === lift ? side.clone() : lift.clone(),
+    duration: length * rand(0.7, 1.3),
+  };
+}

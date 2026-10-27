@@ -722,18 +722,6 @@ export default function App() {
     }
   }, [performance]);
 
-  // the cinematic reel is a card thing: switching it on brings the card out
-  const cinematic = params.cinematic;
-  const skipCinematic = useRef(true);
-  useEffect(() => {
-    if (skipCinematic.current) {
-      skipCinematic.current = false;
-      return;
-    }
-    if (cinematic) dial.setValues({ mode: 'Card' } as never);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cinematic]);
-
   // switching Hands on hands you the poster: the hands hold its corners
   const hands = params.hands;
   const skipHands = useRef(true);
