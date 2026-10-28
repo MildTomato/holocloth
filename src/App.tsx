@@ -11,6 +11,9 @@ const PERFORMANCE_KEY = 'holocloth.performance';
 /** ?clean renders the cloth alone — no panel, no sticker sheet — for stills like the OG image */
 const CLEAN = new URLSearchParams(window.location.search).has('clean');
 
+/** ?panel=off hides the settings sidebar, ?panel=closed starts it collapsed; open by default */
+const SIDEBAR = new URLSearchParams(window.location.search).get('panel');
+
 /** The performance profile picked on a previous visit, if any. */
 function savedPerformance(): string {
   try {
@@ -1009,7 +1012,9 @@ export default function App() {
           {params.mode !== 'Poster' ? 'Hands hold the poster — set Mode to Poster' : HAND_NOTICE[handStatus]}
         </div>
       )}
-      {!CLEAN && <DialRoot position="top-right" defaultOpen productionEnabled />}
+      {!CLEAN && SIDEBAR !== 'off' && (
+        <DialRoot position="top-right" defaultOpen={SIDEBAR !== 'closed'} productionEnabled />
+      )}
       {!loaderGone && <Loader percent={loadPercent} hiding={assetsReady} />}
     </>
   );
