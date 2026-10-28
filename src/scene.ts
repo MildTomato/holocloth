@@ -12,7 +12,7 @@ import { SurfaceLayer, type DecalItem } from './decals.ts';
 import { normalMapFromImage } from './textures.ts';
 import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
-import { gridSvg, growthSvg, barsSvg, loadImage, fetchDataUrl } from './gridArt.ts';
+import { gridSvg, growthSvg, barsSvg, asciiSvg, asciiGrid, ditherSvg, ditherGrid, sampleLuminance, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
 import { MetalCard } from './card.ts';
 import type { StackParams } from './cardStack.ts';
@@ -96,6 +96,12 @@ export interface HoloParams {
   };
   grid: {
     pattern: string;
+    /** Flower: which flower is set in type */
+    flower?: string;
+    /** Flower: glyph size, Small to Huge */
+    type?: string;
+    /** Flower: set in type (ASCII) or dithered (Atkinson, Bayer, Halftone) */
+    style?: string;
     /** Growth: how many halvings from Petabyte down to Prototype */
     steps: number;
     rows: number;
@@ -135,6 +141,10 @@ const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
   ACES: THREE.ACESFilmicToneMapping,
   Neutral: THREE.NeutralToneMapping,
 };
+
+/** the Flower artwork's photos: each a single stem on solid black */
+const flowerSrc = (name: string) =>
+  `/artwork/flowers/${name.toLowerCase()}.jpg`;
 
 const CLOTH_LONG_SIDE = 3;
 /** seconds for the camera to move in on a pulled-out plate, or back */
@@ -300,6 +310,10 @@ export class HoloApp {
   private gridJob = 0;
   private gridTimer: number | null = null;
   private gridField: Promise<string> | null = null;
+  /** a photo uploaded for the Flower artwork, in place of the chosen flower; and a count that changes with it */
+  private flowerUpload: string | null = null;
+  private flowerVersion = 0;
+  private lastFlower: string | undefined;
   private originalArt: Promise<HTMLImageElement> | null = null;
 
   constructor(private host: HTMLElement) {
@@ -540,13 +554,17 @@ export class HoloApp {
    */
   private updateGridArt(g: HoloParams['grid']) {
     if (!g) return;
-    const generated = g.pattern === 'Generated' || g.pattern === 'Growth' || g.pattern === 'Bars';
+    const generated = g.pattern === 'Generated' || g.pattern === 'Growth' || g.pattern === 'Bars' || g.pattern === 'Flower';
     const key = g.pattern === 'Generated'
       ? ['Generated', g.rows, g.depth, g.fill, g.endCircles, g.guides, g.seed].join('|')
       : g.pattern === 'Growth'
         ? ['Growth', g.steps, g.guides].join('|')
+        : g.pattern === 'Flower' ? `Flower|${g.flower}|${g.style}|${g.type}|${this.flowerVersion}`
         : g.pattern === 'Bars' ? 'Bars' : 'Original';
     if (key === this.gridKey) return;
+    // picking a flower from the list replaces an uploaded photo
+    if (g.flower !== this.lastFlower && this.lastFlower !== undefined) this.flowerUpload = null;
+    this.lastFlower = g.flower;
     const first = this.gridKey === '';
     this.gridKey = key;
     // at boot the app is already loading the original as the startup image
@@ -567,6 +585,19 @@ export class HoloApp {
 
   private async generateGridArt(g: HoloParams['grid']) {
     const field = await (this.gridField ??= fetchDataUrl('/artwork/field.png'));
+    if (g.pattern === 'Flower') {
+      const src = this.flowerUpload ?? flowerSrc(g.flower ?? 'Tulip');
+      const style = g.style ?? 'ASCII';
+      let svg: string;
+      if (style === 'ASCII') {
+        const { cols, rows } = asciiGrid(g.type);
+        svg = asciiSvg(await sampleLuminance(src, cols, rows), cols, rows, field, g.type);
+      } else {
+        const { cols, rows } = ditherGrid(g.type, style);
+        svg = ditherSvg(await sampleLuminance(src, cols, rows, 1), cols, rows, field, style, g.type);
+      }
+      return loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+    }
     const svg = g.pattern === 'Bars' ? barsSvg(field) : g.pattern === 'Growth'
       ? growthSvg({ rows: g.steps, guides: g.guides }, field)
       : gridSvg({
@@ -679,6 +710,13 @@ export class HoloApp {
   }
 
   /** Startup art just landed: put the chosen grid pattern over it, unless it's Original. */
+  /** Set the Flower artwork from another photo (best: a subject lit on a black ground). */
+  setFlowerImage(img: HTMLImageElement) {
+    this.flowerUpload = img.src;
+    this.flowerVersion++;
+    if (this.params) this.updateGridArt(this.params.grid);
+  }
+
   refreshGridArt() {
     if (!this.params) return;
     this.gridKey = '';

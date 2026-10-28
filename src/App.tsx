@@ -471,8 +471,26 @@ const BASE_PANEL = {
   grid: {
     pattern: {
       type: 'select' as const,
-      options: ['Original', 'Generated', 'Growth', 'Bars'],
+      options: ['Original', 'Generated', 'Growth', 'Bars', 'Flower'],
       default: 'Growth',
+    },
+    /** Flower: which flower is set in type */
+    flower: {
+      type: 'select' as const,
+      options: ['Tulip', 'Peony', 'Rose', 'Poppy', 'Calla', 'Magnolia', 'Anemone'],
+      default: 'Tulip',
+    },
+    /** Flower: set in type, or dithered */
+    style: {
+      type: 'select' as const,
+      options: ['ASCII', 'Atkinson', 'Bayer', 'Halftone'],
+      default: 'ASCII',
+    },
+    /** Flower: glyph or pixel size */
+    type: {
+      type: 'select' as const,
+      options: ['Small', 'Medium', 'Large', 'Huge'],
+      default: 'Large',
     },
     steps: [6, 2, 8, 1],
     rows: [2, 1, 6, 1],
@@ -482,6 +500,7 @@ const BASE_PANEL = {
     guides: true,
     seed: [7, 1, 999, 1],
     shuffle: { type: 'action' as const, label: 'Shuffle grid' },
+    uploadFlower: { type: 'action' as const, label: 'Flower from photo…' },
   },
   physics: {
     _collapsed: true,
@@ -566,6 +585,7 @@ export default function App() {
   const decalInputRef = useRef<HTMLInputElement>(null);
   const clothInputRef = useRef<HTMLInputElement>(null);
   const bumpInputRef = useRef<HTMLInputElement>(null);
+  const flowerInputRef = useRef<HTMLInputElement>(null);
 
   const dial = useDialKitController(
     'Holocloth',
@@ -588,6 +608,7 @@ export default function App() {
         else if (name === 'addImage') decalInputRef.current?.click();
         else if (name === 'makeCloth') clothInputRef.current?.click();
         else if (name === 'uploadBump') bumpInputRef.current?.click();
+        else if (name === 'uploadFlower') flowerInputRef.current?.click();
         else if (name === 'pickFocus') app.startPickFocus();
         else if (name === 'autoFocus') app.clearPickFocus();
         else if (name === 'clearImages') {
@@ -916,6 +937,22 @@ export default function App() {
             loadImageFile(file, (img) => {
               appRef.current?.setClothImage(img);
               dial.setValues({ images: { useImage: true } } as never);
+            });
+          }
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={flowerInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            loadImageFile(file, (img) => {
+              appRef.current?.setFlowerImage(img);
+              dial.setValues({ grid: { pattern: 'Flower' } } as never);
             });
           }
           e.target.value = '';

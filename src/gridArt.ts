@@ -223,6 +223,210 @@ export function barsSvg(fieldDataUrl: string): string {
   return pageSvg(barsLinework(), fieldDataUrl);
 }
 
+/**
+ * A photograph set in type: the page between the margin rule and the right
+ * margin becomes a grid of monospaced characters, each cell's glyph chosen
+ * by how bright the photo is there — denser glyphs for brighter. On the
+ * page the ink is dark, so a bright flower on black prints as a dark mass of
+ * characters on open paper.
+ */
+export const ASCII = {
+  x0: RULE_X + 40,
+  x1: W - RULE_X,
+  y0: 176,
+  y1: RULE_BOTTOM,
+  /** a cell at Small: one glyph's advance by one line */
+  cellW: 16,
+  cellH: 26,
+};
+/** type sizes: how many Small cells wide one glyph is */
+export const ASCII_SIZES: Record<string, number> = { Small: 1, Medium: 1.5, Large: 2, Huge: 3 };
+const cell = (size = 'Small') => {
+  const k = ASCII_SIZES[size] ?? 1;
+  return { w: ASCII.cellW * k, h: ASCII.cellH * k };
+};
+/** light to dense */
+const RAMP = ' .:-=+*#%@';
+
+/** The grid's size in cells, to sample the photo at. */
+export function asciiGrid(size?: string) {
+  const { w, h } = cell(size);
+  return {
+    cols: Math.floor((ASCII.x1 - ASCII.x0) / w),
+    rows: Math.floor((ASCII.y1 - ASCII.y0) / h),
+  };
+}
+
+/** Rows of glyphs from per-cell brightness (0..1, row-major, cols x rows). */
+export function asciiLinework(lum: Float32Array, cols: number, rows: number, size?: string): string {
+  const { w, h } = cell(size);
+  const out: string[] = [];
+  for (let r = 0; r < rows; r++) {
+    let row = '';
+    for (let c = 0; c < cols; c++) {
+      const v = lum[r * cols + c];
+      row += RAMP[Math.min(RAMP.length - 1, Math.floor(v * RAMP.length))];
+    }
+    if (!row.trim()) continue;
+    const y = ASCII.y0 + (r + 0.8) * h;
+    // the row is pinned to the grid's exact width, whatever the font's advance
+    out.push(`<text x="${ASCII.x0}" y="${f(y)}" textLength="${cols * w}" lengthAdjust="spacing" xml:space="preserve">${row}</text>`);
+  }
+  return `<g fill="${STROKE}" stroke="none" font-family="Menlo, Monaco, 'Courier New', monospace" font-size="${h * 0.85}">
+    ${out.join('\n    ')}
+  </g>`;
+}
+
+export function asciiSvg(lum: Float32Array, cols: number, rows: number, fieldDataUrl: string, size?: string): string {
+  return pageSvg(asciiLinework(lum, cols, rows, size), fieldDataUrl);
+}
+
+/**
+ * A photo's brightness on a cols x rows grid, 0..1 per cell. The photo
+ * covers the grid's shape, cropped evenly from the sides; the black ground
+ * drops out and the subject's tones are spread over the full range.
+ */
+export async function sampleLuminance(src: string, cols: number, rows: number, cellAspect = ASCII.cellW / ASCII.cellH) {
+  const img = await loadImage(src);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.imageSmoothingQuality = 'high';
+  const tone = (r: number, g: number, b: number) => (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+
+  // find the subject: the box around everything brighter than the black ground
+  const P = 200;
+  canvas.width = canvas.height = P;
+  ctx.drawImage(img, 0, 0, P, P);
+  const probe = ctx.getImageData(0, 0, P, P).data;
+  let x0 = P, y0 = P, x1 = 0, y1 = 0;
+  for (let y = 0; y < P; y++) {
+    for (let x = 0; x < P; x++) {
+      const i = (y * P + x) * 4;
+      if (tone(probe[i], probe[i + 1], probe[i + 2]) > 0.12) {
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+        y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      }
+    }
+  }
+  if (x1 <= x0) { x0 = 0; y0 = 0; x1 = P; y1 = P; }
+  // that box, with generous air round it, grown to the grid's shape on the page
+  // (cells are taller than wide: a glyph and its line)
+  const sx = img.width / P, sy = img.height / P;
+  let w = (x1 - x0) * sx * 1.6, h = (y1 - y0) * sy * 1.35;
+  const aspect = (cols * cellAspect) / rows;
+  if (w / h < aspect) w = h * aspect; else h = w / aspect;
+  const cx = ((x0 + x1) / 2) * sx, cy = ((y0 + y1) / 2) * sy;
+
+  canvas.width = cols;
+  canvas.height = rows;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, cols, rows);
+  ctx.drawImage(img, cx - w / 2, cy - h / 2, w, h, 0, 0, cols, rows);
+  const px = ctx.getImageData(0, 0, cols, rows).data;
+  const raw = new Float32Array(cols * rows);
+  for (let i = 0; i < raw.length; i++) raw[i] = tone(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]);
+  // the subject's own range — darkest to brightest petal, trimmed of
+  // outliers — spread over the whole ramp, so a pale flower keeps its
+  // modelling instead of printing as one dense block
+  const GROUND = 0.07;
+  const subject = Array.from(raw).filter((l) => l > GROUND).sort((a, b) => a - b);
+  const lo = subject[Math.floor(subject.length * 0.03)] ?? GROUND;
+  const hi = subject[Math.floor(subject.length * 0.985)] ?? 1;
+  const lum = new Float32Array(cols * rows);
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] <= GROUND) continue; // the black ground drops out
+    const v = Math.max(0, Math.min(1, (raw[i] - lo) / Math.max(0.05, hi - lo)));
+    // the faintest glyph and up; only the real highlights reach the densest
+    lum[i] = 0.1 + 0.9 * v ** 1.6;
+  }
+  return lum;
+}
+
+/**
+ * Dither: the same margin as the type, as a grid of square pixels on the 8px
+ * grid. Each style turns the photo's tones into ink a different way —
+ * Atkinson diffuses the error (the old 1-bit Mac look, clipped highlights),
+ * Bayer uses an ordered threshold (a regular crosshatched texture), and
+ * Halftone sets one dot per cell, its size the tone.
+ */
+export const DITHER_STYLES = ['Atkinson', 'Bayer', 'Halftone'];
+
+/** Pixel size per type size: 8px grid units. */
+const ditherPx = (size?: string, style?: string) =>
+  8 * (ASCII_SIZES[size ?? 'Small'] ?? 1) * (style === 'Halftone' ? 2 : 1);
+
+export function ditherGrid(size?: string, style?: string) {
+  const px = ditherPx(size, style);
+  return {
+    cols: Math.floor((ASCII.x1 - ASCII.x0) / px),
+    rows: Math.floor((ASCII.y1 - ASCII.y0) / px),
+  };
+}
+
+const BAYER4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+export function ditherLinework(lum: Float32Array, cols: number, rows: number, style: string, size?: string): string {
+  const px = ditherPx(size, style);
+  const x = (c: number) => ASCII.x0 + c * px;
+  const y = (r: number) => ASCII.y0 + r * px;
+  if (style === 'Halftone') {
+    const dots: string[] = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const v = lum[r * cols + c];
+        if (v <= 0) continue;
+        // area tracks tone; the densest dots just kiss their neighbours
+        const rad = (px / 2) * Math.sqrt(v) * 1.05;
+        dots.push(`<circle cx="${f(x(c) + px / 2)}" cy="${f(y(r) + px / 2)}" r="${f(rad)}"/>`);
+      }
+    }
+    return `<g fill="${STROKE}" stroke="none">${dots.join('')}</g>`;
+  }
+  const on = new Uint8Array(cols * rows);
+  if (style === 'Bayer') {
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const v = lum[r * cols + c];
+        on[r * cols + c] = v > 0 && v > (BAYER4[(r % 4) * 4 + (c % 4)] + 0.5) / 16 ? 1 : 0;
+      }
+    }
+  } else {
+    // Atkinson: pass on 6/8 of the error, so highlights and shadows clip
+    const e = Float32Array.from(lum);
+    const push = (c: number, r: number, d: number) => {
+      if (c >= 0 && c < cols && r < rows && lum[r * cols + c] > 0) e[r * cols + c] += d;
+    };
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        if (lum[i] <= 0) continue; // the ground stays clear paper
+        const ink = e[i] >= 0.5 ? 1 : 0;
+        on[i] = ink;
+        const d = (e[i] - ink) / 8;
+        push(c + 1, r, d); push(c + 2, r, d);
+        push(c - 1, r + 1, d); push(c, r + 1, d); push(c + 1, r + 1, d);
+        push(c, r + 2, d);
+      }
+    }
+  }
+  // one path, a run of pixels per segment
+  let d = '';
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (!on[r * cols + c]) continue;
+      let run = 1;
+      while (c + run < cols && on[r * cols + c + run]) run++;
+      d += `M${x(c)} ${y(r)}h${run * px}v${px}h${-run * px}z`;
+      c += run - 1;
+    }
+  }
+  return `<path fill="${STROKE}" stroke="none" d="${d}"/>`;
+}
+
+export function ditherSvg(lum: Float32Array, cols: number, rows: number, fieldDataUrl: string, style: string, size?: string): string {
+  return pageSvg(ditherLinework(lum, cols, rows, style, size), fieldDataUrl);
+}
+
 function pageSvg(linework: string, fieldDataUrl: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
