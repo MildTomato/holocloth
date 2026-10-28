@@ -1,6 +1,8 @@
 import * as THREE from 'three';
+import { MAX_PLATES, StackAnimator, type StackParams } from './cardStack.ts';
 
 const THICKNESS = 0.045;
+const plateM = new THREE.Matrix4();
 /** the printed face sits a hair proud of the slab, so the two never z-fight */
 const FACE_LIFT = 0.0004;
 const CORNER_SEGMENTS = 10;
@@ -47,8 +49,13 @@ export class MetalCard {
   readonly slab: THREE.Mesh<THREE.ExtrudeGeometry, THREE.Material[]>;
   /** the printed face — the only part stickers and the artwork live on */
   readonly face: THREE.Mesh<THREE.ShapeGeometry, THREE.MeshPhysicalMaterial>;
+  /** the stack's plates: every copy of the card, drawn instanced */
+  readonly stackSlab: THREE.InstancedMesh<THREE.ExtrudeGeometry, THREE.Material[]>;
+  readonly stackFace: THREE.InstancedMesh<THREE.ShapeGeometry, THREE.MeshPhysicalMaterial>;
   dragging = false;
 
+  private stack = new StackAnimator();
+  private stackParams: StackParams = { shape: 'Single', count: 48, twist: 0.5, spacing: 0.4, flow: 0 };
   private front: THREE.MeshPhysicalMaterial;
   private metal: THREE.MeshPhysicalMaterial;
   private edge: THREE.MeshPhysicalMaterial;
@@ -178,7 +185,15 @@ export class MetalCard {
     // extrude groups: 0 = the two caps (metal), 1 = the sides (edge)
     this.slab = new THREE.Mesh(new THREE.ExtrudeGeometry(), [metal, this.edge]);
     this.face = new THREE.Mesh(new THREE.ShapeGeometry(), this.front);
-    this.group.add(this.slab, this.face);
+    this.stackSlab = new THREE.InstancedMesh(this.slab.geometry, [metal, this.edge], MAX_PLATES);
+    this.stackFace = new THREE.InstancedMesh(this.face.geometry, this.front, MAX_PLATES);
+    for (const m of [this.stackSlab, this.stackFace]) {
+      m.count = 0;
+      m.visible = false;
+      // the formation moves every frame: cheaper to draw it than to cull it
+      m.frustumCulled = false;
+    }
+    this.group.add(this.slab, this.face, this.stackSlab, this.stackFace);
     this.group.visible = false;
     this.rebuild();
   }
@@ -245,6 +260,83 @@ export class MetalCard {
     this.face.geometry.dispose();
     this.slab.geometry = slab;
     this.face.geometry = face;
+    if (this.stackSlab) {
+      this.stackSlab.geometry = slab;
+      this.stackFace.geometry = face;
+    }
+  }
+
+  /** Copies of the card arranged into a formation (Single = just the card); Cycle moves through them all. */
+  setStack(params: StackParams) {
+    this.stackParams = { ...params, count: Math.round(THREE.MathUtils.clamp(params.count, 2, MAX_PLATES)) };
+    // One (or an old link's Single) folds the plates back into one card
+    this.stack.setTarget(params.cards !== 'Stack' ? 'Single' : params.shape);
+  }
+
+  /** whether the card is showing as a formation of plates (not a single card) */
+  get stacked() {
+    return !this.stack.collapsed;
+  }
+
+  /** Which plate a raycast hit, or null. */
+  plateAt(hit: THREE.Intersection | null) {
+    if (!hit || hit.instanceId === undefined) return null;
+    return hit.object === this.stackSlab || hit.object === this.stackFace ? hit.instanceId : null;
+  }
+
+  /** Pull a plate out to the front (null puts it back); the card stops spinning meanwhile. */
+  focusPlate(i: number | null) {
+    this.stack.setFocus(i);
+    if (i !== null) this.vel = { x: 0, y: 0 };
+  }
+
+  get focusedPlate() {
+    return this.stack.focused;
+  }
+
+  /** Where a pulled-out plate sits, and which way it faces, in world space. */
+  plateSpot(position: THREE.Vector3, normal: THREE.Vector3, up: THREE.Vector3) {
+    this.group.updateWorldMatrix(true, false);
+    position.copy(this.stack.front).applyMatrix4(this.group.matrixWorld);
+    normal.set(0, 0, 1).transformDirection(this.group.matrixWorld);
+    up.set(0, 1, 0).transformDirection(this.group.matrixWorld);
+  }
+
+  /** how many plates the stack is drawing */
+  get plateCount() {
+    return this.stackParams.count;
+  }
+
+  /**
+   * A point on plate i's face, (u, v) from its middle in fractions of the
+   * card (-0.5..0.5), and the face's normal — in world space, as it is now.
+   */
+  platePoint(i: number, u: number, v: number, point: THREE.Vector3, normal: THREE.Vector3) {
+    this.group.updateWorldMatrix(true, false);
+    this.stackSlab.getMatrixAt(i, plateM);
+    plateM.premultiply(this.group.matrixWorld);
+    const { w, h } = this.size;
+    point.set(u * w, v * h, THICKNESS / 2).applyMatrix4(plateM);
+    normal.set(0, 0, 1).transformDirection(plateM);
+  }
+
+  /** Where a world point lies on plate i, in fractions of the card from its middle. */
+  plateUv(i: number, point: THREE.Vector3) {
+    this.group.updateWorldMatrix(true, false);
+    this.stackSlab.getMatrixAt(i, plateM);
+    plateM.premultiply(this.group.matrixWorld).invert();
+    const local = point.clone().applyMatrix4(plateM);
+    return { u: local.x / this.size.w, v: local.y / this.size.h };
+  }
+
+  /** The solid metal that's showing — the card, or the stack's plates — for aiming rays at. */
+  get solid(): THREE.Object3D {
+    return this.stacked ? this.stackSlab : this.slab;
+  }
+
+  /** whether a hit landed on the card's printed face (the card's own, or a plate's) */
+  isFace(object: THREE.Object3D) {
+    return object === this.face || object === this.stackFace;
   }
 
   /** The surface textures are recreated when the artwork's shape changes. */
@@ -297,6 +389,7 @@ export class MetalCard {
   }
 
   update(dt: number, time: number) {
+    this.updateStack(dt);
     if (this.posed) {
       this.group.rotation.copy(this.posed);
       this.group.position.copy(this.posedAt);
@@ -318,5 +411,17 @@ export class MetalCard {
     this.group.rotation.set(this.rot.x, this.rot.y, 0);
     // a slow float, so it never looks parked
     this.group.position.y = Math.sin(time * 0.9) * 0.04;
+  }
+
+  private updateStack(dt: number) {
+    const { w, h } = this.size;
+    // a pulled-out plate past the end of a shrunk stack goes back
+    const f = this.stack.focused;
+    if (f !== null && f >= this.stackParams.count) this.stack.setFocus(null);
+    this.stack.update(dt, [this.stackSlab, this.stackFace], this.stackParams.count, w, h, THICKNESS, this.stackParams);
+    // settled on one card: draw the card itself
+    const single = this.stack.collapsed;
+    this.slab.visible = this.face.visible = single;
+    this.stackSlab.visible = this.stackFace.visible = !single;
   }
 }

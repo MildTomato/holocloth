@@ -15,8 +15,9 @@ import { BAKED_POSE } from './bakedPose.ts';
 import { gridSvg, growthSvg, barsSvg, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
 import { MetalCard } from './card.ts';
+import type { StackParams } from './cardStack.ts';
 import {
-  nextShot, shotCamera, shotLight, shotPose, nextClothShot, type Shot, type ClothShot,
+  nextShot, shotCamera, shotLight, shotPose, nextClothShot, moveProgress, shotProgress, type Shot, type ClothShot,
 } from './cinematic.ts';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { HandTracker, type HandsFrame } from './handTracker.ts';
@@ -47,6 +48,12 @@ export interface HoloParams {
     shotLength: number;
     drama: number;
   };
+  /** Card mode: dragging the card 'Spin card's it, or 'Move camera' orbits */
+  drag?: string;
+  /** Card mode: 'One' card, or a 'Stack' of them */
+  cards?: string;
+  /** copies of the card stacked into a formation, and how it moves */
+  stack?: StackParams;
   physics: {
     viscosity: number;
     stiffness: number;
@@ -130,6 +137,8 @@ const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
 };
 
 const CLOTH_LONG_SIDE = 3;
+/** seconds for the camera to move in on a pulled-out plate, or back */
+const PLATE_CAM_TIME = 0.9;
 // Hands: the camera frame maps onto this world width, centred this high
 const HOLD_SPAN = 3.2;
 const HOLD_CENTER_Y = 1.0;
@@ -200,6 +209,13 @@ export class HoloApp {
   private revealed = false;
   private cardDragId: number | null = null;
   private cardLast = { x: 0, y: 0, t: 0 };
+  /** a press on the stack that may turn out to be a click: on a plate, or on nothing */
+  private plateClick: { id: number; x: number; y: number; plate: number | null } | null = null;
+  /**
+   * The camera's move in on a pulled-out plate: 0 at rest, 1 framing it.
+   * `rest` is where it was before, to go back to.
+   */
+  private plateCam = { k: 0, rest: null as { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 } | null };
   /** the card's cinematic reel: the shot on screen, and the camera to go back to */
   private cine: {
     /** a card shot, in Card mode */
@@ -208,9 +224,17 @@ export class HoloApp {
     cloth: ClothShot | null;
     /** which the current shot is of, to cut when the mode changes */
     forCard: boolean;
+    /**
+     * a shot of one plate of the stack: which spot it's on (so the camera
+     * can follow it as the formation moves), and where that spot was when
+     * the shot was framed
+     */
+    plate: { i: number; u: number; v: number; start: THREE.Vector3 } | null;
     t0: number;
     saved: { position: THREE.Vector3; target: THREE.Vector3 };
   } | null = null;
+  /** the reel's focus distance, eased so it doesn't flicker between plates */
+  private cineFocusDist = 0;
   private cinePose = new THREE.Euler();
   private cinePos = new THREE.Vector3();
   private cineFocus = new THREE.Vector3();
@@ -445,6 +469,7 @@ export class HoloApp {
       this.card.setEtch(p.card.ink, p.card.etchDepth, p.card.etchBevel);
       this.card.setCorner(p.card.corner);
     }
+    if (p.stack) this.card.setStack({ ...p.stack, cards: p.cards });
     this.drama = p.card?.drama ?? 0.7;
     this.setCinematic(!!p.cinematic, p.card?.shotLength ?? 2.2);
     this.faceCollider.depth = p.physics.faceDepth;
@@ -755,6 +780,7 @@ export class HoloApp {
       this.cine = {
         shot: null,
         cloth: null,
+        plate: null,
         forCard: this.cardMode,
         t0: 0,
         saved: { position: this.camera.position.clone(), target: this.controls.target.clone() },
@@ -796,7 +822,21 @@ export class HoloApp {
     c.t0 = this.elapsed;
     c.forCard = this.cardMode;
     const light = this.cineLight;
-    if (this.cardMode) {
+    c.plate = null;
+    if (this.cardMode && this.card.stacked) {
+      // a stack: shots of real plates, gliding like the cloth's, from
+      // angles where nothing stands between the camera and the plate
+      this.card.setPose(null);
+      c.shot = null;
+      const { shot, plate } = this.stackShot(c.cloth ?? undefined);
+      c.cloth = shot;
+      c.plate = plate;
+      this.placeCamera(shot.camFrom, shot.target, shot.up);
+      if (light) {
+        light.width = 0.45;
+        light.height = 4;
+      }
+    } else if (this.cardMode) {
       c.cloth = null;
       const { w, h } = this.card.dims;
       c.shot = nextShot(w, h, this.shotLength, c.shot ?? undefined);
@@ -826,6 +866,53 @@ export class HoloApp {
       }
     }
     this.runCinematic();
+  }
+
+  /**
+   * A shot of one plate of the stack. Picks a spot on a plate and a camera
+   * move for it, and keeps it only if the plate is in clear view from both
+   * ends of the move; after a few misses, a wider look at the whole stack.
+   */
+  private stackShot(prev?: ClothShot) {
+    const point = new THREE.Vector3(), normal = new THREE.Vector3();
+    const n = this.card.plateCount;
+    let fallback: { shot: ClothShot; plate: { i: number; u: number; v: number; start: THREE.Vector3 } } | null = null;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const i = Math.floor(Math.random() * n);
+      const u = THREE.MathUtils.randFloat(-0.35, 0.35), v = THREE.MathUtils.randFloat(-0.35, 0.35);
+      this.card.platePoint(i, u, v, point, normal);
+      const shot = nextClothShot(point, normal, this.shotLength, prev);
+      const plate = { i, u, v, start: point.clone() };
+      if (this.inClearView(shot.camFrom, point) && this.inClearView(shot.camTo, point)) return { shot, plate };
+      // blocked: aim instead at whatever plate the camera does see that way
+      fallback ??= this.retarget(shot);
+    }
+    if (fallback) return fallback;
+    // nothing in that direction at all: aim at the first plate, from the front
+    this.card.platePoint(0, 0, 0, point, normal);
+    return { shot: nextClothShot(point, normal, this.shotLength, prev), plate: { i: 0, u: 0, v: 0, start: point.clone() } };
+  }
+
+  /** Re-aim a shot at the first plate surface its camera sees toward the target. */
+  private retarget(shot: ClothShot) {
+    const dir = shot.target.clone().sub(shot.camFrom).normalize();
+    this.raycaster.set(shot.camFrom, dir);
+    const hit = this.raycaster.intersectObject(this.card.solid, false)[0];
+    if (!hit || hit.instanceId === undefined) return null;
+    const { u, v } = this.card.plateUv(hit.instanceId, hit.point);
+    // keep the move (a slide carries its aim with it), now on the visible spot
+    shot.targetTo.add(hit.point).sub(shot.target);
+    shot.target.copy(hit.point);
+    return { shot, plate: { i: hit.instanceId, u, v, start: hit.point.clone() } };
+  }
+
+  /** Whether a straight line from the camera reaches this point before any other plate. */
+  private inClearView(from: THREE.Vector3, point: THREE.Vector3) {
+    const dir = point.clone().sub(from);
+    const dist = dir.length();
+    this.raycaster.set(from, dir.normalize());
+    const hit = this.raycaster.intersectObject(this.card.solid, false)[0];
+    return !hit || hit.distance > dist - 0.03;
   }
 
   private placeCamera(position: THREE.Vector3, target: THREE.Vector3, up: THREE.Vector3) {
@@ -867,30 +954,51 @@ export class HoloApp {
     if (c.shot) {
       const shot = c.shot;
       kind = shot.kind;
-      shotPose(shot, f, this.cinePose, this.cinePos);
+      shotPose(shot, shotProgress(shot, f), this.cinePose, this.cinePos);
       this.card.setPose(this.cinePose, this.cinePos);
       this.cineFocus.copy(shot.focus).applyEuler(this.cinePose).add(this.cinePos);
     } else {
       // the cloth moves by itself: glide the camera and carry the light across
       const shot = c.cloth!;
       kind = shot.kind;
-      const ease = f * f * (3 - 2 * f);
-      this.camera.position.lerpVectors(shot.camFrom, shot.camTo, ease);
-      this.camera.up.copy(shot.up);
-      this.camera.lookAt(shot.target);
-      this.cineFocus.copy(shot.target);
+      const ease = moveProgress(shot, f);
+      // a plate of the stack drifts with its formation: camera and light go with it
+      const shift = new THREE.Vector3();
+      if (c.plate) {
+        const now = new THREE.Vector3();
+        this.card.platePoint(c.plate.i, c.plate.u, c.plate.v, now, new THREE.Vector3());
+        shift.subVectors(now, c.plate.start);
+      }
+      const target = shot.target.clone().lerp(shot.targetTo, ease).add(shift);
+      this.camera.position.lerpVectors(shot.camFrom, shot.camTo, ease).add(shift);
+      this.camera.up.copy(shot.up).lerp(shot.upTo, ease).normalize();
+      this.camera.lookAt(target);
+      this.cineFocus.copy(target);
       const light = this.cineLight;
       if (light) {
-        light.position.lerpVectors(shot.lightFrom, shot.lightTo, f);
+        light.position.lerpVectors(shot.lightFrom, shot.lightTo, f).add(shift);
         light.up.copy(shot.lightUp);
-        light.lookAt(shot.target);
+        light.lookAt(target);
       }
     }
     // depth of field on the framed spot. The sharp zone scales with the shot
     // distance so it holds the spot and its surroundings; past it, blur
     // builds gradually (full only a quarter of the distance further out),
     // to a modest maximum — never a thin sharp strip with the rest smeared
-    const focusDist = this.camera.position.distanceTo(this.cineFocus);
+    // focus on whatever is at the middle of the frame: in a stack that may
+    // be a nearer plate than the one aimed at, or one behind a gap
+    let focusDist = this.camera.position.distanceTo(this.cineFocus);
+    if (this.cardMode) {
+      const look = this.cineFocus.clone().sub(this.camera.position).normalize();
+      this.raycaster.set(this.camera.position, look);
+      const hit = this.raycaster.intersectObject(this.card.solid, false)[0];
+      if (hit) focusDist = hit.distance;
+    }
+    // a cut snaps focus; within a shot it eases, like a focus puller
+    this.cineFocusDist = t < 0.05 || this.cineFocusDist === 0
+      ? focusDist
+      : THREE.MathUtils.lerp(this.cineFocusDist, focusDist, 0.15);
+    focusDist = this.cineFocusDist;
     const maxBlur = (0.01 + 0.02 * this.drama) * (kind === 'wide' ? 0.5 : 1);
     this.dofPass.enabled = true;
     this.dofPass.setParams(maxBlur / 0.25, maxBlur, focusDist * 0.15);
@@ -902,6 +1010,47 @@ export class HoloApp {
     if (this.cineLight) this.cineLight.intensity = 6 + 34 * this.drama;
   }
 
+  /**
+   * Pull a plate of the stack out to the front and move the camera in,
+   * square to it; null puts it back and returns the camera to where it was.
+   */
+  private focusPlate(plate: number | null) {
+    if (plate !== null && this.card.focusedPlate === null && this.plateCam.k === 0) {
+      this.plateCam.rest = {
+        position: this.camera.position.clone(),
+        target: this.controls.target.clone(),
+        up: this.camera.up.clone(),
+      };
+    }
+    this.card.focusPlate(plate);
+  }
+
+  /** Ease the camera toward a pulled-out plate, or back to rest. */
+  private updatePlateCamera(dt: number) {
+    const c = this.plateCam;
+    const focused = this.card.focusedPlate !== null;
+    // anything that ends the stack, or the reel taking the camera, sends it back
+    if (focused && (!this.cardMode || !this.card.stacked || this.cine)) this.card.focusPlate(null);
+    const goal = this.card.focusedPlate !== null ? 1 : 0;
+    // at rest there is nothing to do; held on a plate, keep following it as it floats
+    if (!c.rest || (c.k === 0 && goal === 0)) return;
+    c.k = THREE.MathUtils.clamp(c.k + (goal ? dt : -dt) / PLATE_CAM_TIME, 0, 1);
+    const k = c.k < 0.5 ? 4 * c.k ** 3 : 1 - (-2 * c.k + 2) ** 3 / 2;
+    // framed square-on, the plate filling most of the height
+    const spot = new THREE.Vector3(), normal = new THREE.Vector3(), up = new THREE.Vector3();
+    this.card.plateSpot(spot, normal, up);
+    const { w, h } = this.card.dims;
+    const half = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
+    const dist = Math.max(h / 2, w / 2 / this.camera.aspect) / half / 0.8;
+    const at = spot.clone().addScaledVector(normal, dist);
+    this.camera.position.copy(c.rest.position).lerp(at, k);
+    this.controls.target.copy(c.rest.target).lerp(spot, k);
+    this.camera.up.copy(c.rest.up).lerp(up, k).normalize();
+    this.camera.lookAt(this.controls.target);
+    this.controls.enabled = c.k === 0;
+    if (c.k === 0) c.rest = null;
+  }
+
   /** Any part of the card under the pointer — for spinning it. */
   private raycastCard(): THREE.Intersection | null {
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
@@ -909,6 +1058,8 @@ export class HoloApp {
   }
 
   private startCardSpin(e: PointerEvent) {
+    // Move camera: dragging the card orbits instead, and the view stays where it's left
+    if (this.params?.drag === 'Move camera') return;
     if (!this.raycastCard()) return; // empty space: let OrbitControls orbit
     this.card.dragging = true;
     this.cardDragId = e.pointerId;
@@ -1084,7 +1235,7 @@ export class HoloApp {
     if (this.cardMode) {
       // in Card mode the "surface" is the card's printed face
       const hit = this.raycaster.intersectObject(this.card.group, true)[0];
-      return hit?.object === this.card.face ? hit : null;
+      return hit && this.card.isFace(hit.object) ? hit : null;
     }
     this.clothGeometry.computeBoundingSphere();
     const hits = this.raycaster.intersectObject(this.clothMesh, false);
@@ -1196,6 +1347,12 @@ export class HoloApp {
       this.cutToNextShot();
       return;
     }
+    if (this.cardMode && this.card.stacked) {
+      // a click on a plate pulls it out; a click anywhere else puts it back
+      const plate = this.card.plateAt(this.raycastCard());
+      this.plateClick = { id: e.pointerId, x: e.clientX, y: e.clientY, plate };
+      if (this.card.focusedPlate !== null) return; // the camera is on it: no spinning or orbiting
+    }
     const hit = this.raycastCloth();
     if (!hit) {
       if (this.cardMode) this.startCardSpin(e); // back or edge of the card
@@ -1278,6 +1435,14 @@ export class HoloApp {
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    const click = this.plateClick;
+    if (click && e.pointerId === click.id) {
+      this.plateClick = null;
+      if (Math.hypot(e.clientX - click.x, e.clientY - click.y) < 6) {
+        if (click.plate !== null) this.focusPlate(click.plate);
+        else if (this.card.focusedPlate !== null) this.focusPlate(null);
+      }
+    }
     if (this.cardDragId !== null && e.pointerId === this.cardDragId) {
       this.card.dragging = false;
       this.cardDragId = null;
@@ -1395,8 +1560,9 @@ export class HoloApp {
       }
     }
 
+    this.updatePlateCamera(dt);
     // the reel places the camera itself; damped controls would ease its cuts
-    if (!this.cine) this.controls.update();
+    if (!this.cine && this.plateCam.k === 0) this.controls.update();
     this.composer.render();
   };
 

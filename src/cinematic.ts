@@ -26,6 +26,22 @@ export interface Shot {
   /** seconds */
   duration: number;
   kind: 'macro' | 'close' | 'medium' | 'wide';
+  /** pace of the swing: even, quick off the mark and settling, or easing in late */
+  ease: 'glide' | 'snap' | 'creep' | 'even';
+}
+
+/** How far through its swing a card shot is, f (0..1) of the way through its time. */
+export function shotProgress(shot: Shot, f: number) {
+  switch (shot.ease) {
+    case 'snap':
+      return 1 - (1 - f) ** 3;
+    case 'creep':
+      return f * f * f;
+    case 'glide':
+      return f * f * (3 - 2 * f);
+    default:
+      return f;
+  }
 }
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -72,21 +88,25 @@ export function nextShot(width: number, height: number, length: number, prev?: S
   // always turning toward the camera: each shot starts at its steepest and
   // turns into the light, never away from it
   const sweep = Math.random() < 0.3 ? 'down' : 'across';
+  // how big the swing is varies shot to shot: a slow tilt to a hard turn
+  const size = Math.random() < 0.2 ? rand(0.15, 0.4) : rand(0.6, 1.8);
   const drift = sweep === 'across'
-    ? { x: rand(-0.06, 0.06), y: Math.sign(az) * rand(0.25, 0.45) }
-    : { x: -Math.sign(el || 1) * rand(0.2, 0.35), y: rand(-0.06, 0.06) };
+    ? { x: rand(-0.06, 0.06), y: Math.sign(az) * rand(0.25, 0.45) * size }
+    : { x: -Math.sign(el || 1) * rand(0.2, 0.35) * size, y: rand(-0.06, 0.06) };
 
   return {
     rot,
     drift,
     sweep,
-    push: dist * rand(0.12, 0.3),
+    // some shots barely move in, some lunge
+    push: dist * (Math.random() < 0.25 ? rand(0, 0.06) : rand(0.12, 0.42)),
     focus,
     view,
     roll: rand(-0.55, 0.55),
     dist,
-    duration: length * rand(0.7, 1.3),
+    duration: length * rand(0.6, 1.5),
     kind,
+    ease: (['even', 'glide', 'snap', 'creep'] as const)[Math.floor(Math.random() * 4)],
   };
 }
 
@@ -125,22 +145,55 @@ export function shotCamera(shot: Shot) {
 }
 
 /**
- * A shot of the cloth, which moves by itself, so here the camera and light
- * do the moving: the camera glides (a slow orbit plus a push in) on a spot
- * of the sheet while the strip light travels across, so its highlight runs
- * over the folds. Always from the front, where the artwork is.
+ * A shot of the cloth (or of one plate of a stack), which moves by itself,
+ * so here the camera and light do the moving. Each shot picks its own
+ * camera move — an orbit, a push in or pull out, a slide across or up, a
+ * roll, or near-stillness — with its own size and pace, while the strip
+ * light travels across so its highlight runs over the surface. Always from
+ * the front, where the artwork is.
  */
+export type CameraMove = 'orbit' | 'push' | 'pull' | 'truck' | 'crane' | 'roll' | 'hold';
+
 export interface ClothShot {
   kind: 'close' | 'medium' | 'wide';
+  move: CameraMove;
+  /** what the camera looks at, start and end of the shot */
   target: THREE.Vector3;
+  targetTo: THREE.Vector3;
   camFrom: THREE.Vector3;
   camTo: THREE.Vector3;
   up: THREE.Vector3;
+  upTo: THREE.Vector3;
+  /** pace of the move: even, quick off the mark and settling, or easing in late */
+  ease: 'glide' | 'snap' | 'creep';
   lightFrom: THREE.Vector3;
   lightTo: THREE.Vector3;
   /** the strip's long side, across the highlight's travel */
   lightUp: THREE.Vector3;
   duration: number;
+}
+
+/** How far through its move a shot is, f (0..1) of the way through its time. */
+export function moveProgress(shot: ClothShot, f: number) {
+  switch (shot.ease) {
+    case 'snap':
+      return 1 - (1 - f) ** 3;
+    case 'creep':
+      return f * f * f;
+    default:
+      return f * f * (3 - 2 * f);
+  }
+}
+
+const MOVES: [CameraMove, number][] = [
+  ['orbit', 3], ['push', 2], ['pull', 1.5], ['truck', 2], ['crane', 1.5], ['roll', 1], ['hold', 1],
+];
+
+function pickMove(prev?: CameraMove): CameraMove {
+  const options = MOVES.filter(([m]) => m !== prev);
+  let r = Math.random() * options.reduce((a, [, w]) => a + w, 0);
+  for (const [m, w] of options) if ((r -= w) <= 0) return m;
+  return options[0][0];
 }
 
 export function nextClothShot(
@@ -160,7 +213,8 @@ export function nextClothShot(
   const n = normal.clone();
   if (n.z < 0) n.negate();
   // a frame around the spot's normal, to rake the camera off it
-  const side = new THREE.Vector3(0, 1, 0).cross(n).normalize();
+  const ref = Math.abs(n.y) > 0.95 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const side = ref.cross(n).normalize();
   const lift = n.clone().cross(side).normalize();
   const az = either() * rand(0.3, 0.9);
   const el = rand(-0.6, 0.6);
@@ -169,30 +223,75 @@ export function nextClothShot(
     .addScaledVector(lift, Math.sin(el))
     .normalize();
 
+  const move = pickMove(prev?.move);
   const camFrom = point.clone().addScaledVector(view, dist);
-  // glide: orbit ~10° around the spot and push in 10-22%
-  const orbit = view.clone().applyAxisAngle(lift, either() * rand(0.12, 0.2));
-  const camTo = point.clone().addScaledVector(orbit, dist * rand(0.78, 0.9));
+  let camTo = camFrom.clone();
+  const target = point.clone();
+  const targetTo = point.clone();
+  const roll = rand(-0.45, 0.45);
+  let rollTo = roll;
+  switch (move) {
+    case 'orbit': {
+      // round the spot: anything from a creep to a sweep, sometimes pushing in as it goes
+      const arc = either() * rand(0.06, 0.55);
+      const axis = Math.random() < 0.7 ? lift : side;
+      camTo = point.clone().addScaledVector(view.clone().applyAxisAngle(axis, arc), dist * rand(0.8, 1.05));
+      break;
+    }
+    case 'push':
+      camTo = point.clone().addScaledVector(view, dist * rand(0.5, 0.82));
+      break;
+    case 'pull':
+      // starts tight and backs off: a reveal
+      camFrom.copy(point).addScaledVector(view, dist * rand(0.55, 0.75));
+      camTo = point.clone().addScaledVector(view, dist * rand(1.05, 1.3));
+      break;
+    case 'truck': {
+      // slide across, camera and its aim together, so the surface tracks past
+      const by = side.clone().multiplyScalar(either() * dist * rand(0.15, 0.45));
+      camTo = camFrom.clone().add(by);
+      targetTo.add(by);
+      break;
+    }
+    case 'crane': {
+      const by = lift.clone().multiplyScalar(either() * dist * rand(0.15, 0.4));
+      camTo = camFrom.clone().add(by);
+      // the aim lags behind, so the angle on the surface changes as it rises
+      targetTo.addScaledVector(by, 0.5);
+      break;
+    }
+    case 'roll':
+      rollTo = roll + either() * rand(0.25, 0.7);
+      camTo = point.clone().addScaledVector(view, dist * rand(0.85, 0.95));
+      break;
+    case 'hold':
+      // all but still: the light does the work
+      camTo = point.clone().addScaledVector(view.clone().applyAxisAngle(lift, either() * 0.02), dist * 0.98);
+      break;
+  }
+  const ease = move === 'hold' ? 'glide' : (['glide', 'glide', 'snap', 'creep'] as const)[Math.floor(Math.random() * 4)];
 
   // light: start where the sheet mirrors it into the camera, then travel
-  // across, so the highlight runs over the folds
+  // across, so the highlight runs over the surface
   const toLight = view.clone().negate().reflect(n);
   const sweepAxis = Math.random() < 0.7 ? lift : side;
-  const swing = either() * rand(0.3, 0.45);
+  const swing = either() * rand(0.2, move === 'hold' ? 0.6 : 0.45);
   const lightFrom = point.clone().addScaledVector(toLight.clone().applyAxisAngle(sweepAxis, -swing), 3.2);
   const lightTo = point.clone().addScaledVector(toLight.clone().applyAxisAngle(sweepAxis, swing), 3.2);
 
-  const roll = rand(-0.45, 0.45);
-  const up = lift.clone().applyAxisAngle(view, roll);
   return {
     kind,
-    target: point.clone(),
+    move,
+    target,
+    targetTo,
     camFrom,
     camTo,
-    up,
+    up: lift.clone().applyAxisAngle(view, roll),
+    upTo: lift.clone().applyAxisAngle(view, rollTo),
+    ease,
     lightFrom,
     lightTo,
     lightUp: sweepAxis === lift ? side.clone() : lift.clone(),
-    duration: length * rand(0.7, 1.3),
+    duration: length * rand(0.6, 1.5),
   };
 }

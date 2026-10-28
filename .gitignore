@@ -4,3 +4,4 @@ dist/
 .claude/
 tsconfig.tsbuildinfo
 .DS_Store
+.vercel

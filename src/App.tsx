@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useDialKitController, DialRoot, DialStore, type DialConfig } from 'dialkit';
 import { HoloApp, type HoloParams, type ImagesState } from './scene.ts';
 import { STICKER_SHEET } from './stickers.ts';
+import { MAX_PLATES, STACK_OPTIONS } from './cardStack.ts';
 import { withUrlDefaults, panelDefaults, flattenValues, writeUrl } from './urlState.ts';
 
 const PERFORMANCE_KEY = 'holocloth.performance';
@@ -35,6 +36,15 @@ const RENDER_DEFAULTS = {
   dofAperture: 40,
   dofBlur: 0.04,
   dofRange: 0.3,
+};
+
+/**
+ * Dark or Light: the room the piece sits in. Light is a pale paper ground
+ * with a brighter room, so the metal reads as reflections of daylight.
+ */
+const THEME_VALUES: Record<string, { background: string; exposure: number; environment: number }> = {
+  Dark: { background: RENDER_DEFAULTS.background, exposure: RENDER_DEFAULTS.exposure, environment: RENDER_DEFAULTS.environment },
+  Light: { background: '#e8e6e1', exposure: 0.85, environment: 1.25 },
 };
 
 /** finish → surface response; presets reference these by name */
@@ -121,7 +131,7 @@ const PRESET_VALUES: Record<string, PresetBundle> = {
       iridescence: 0.81,
       metalness: 0.93,
       sheen: 0.7,
-      bump: 0.5,
+      bump: 0.15,
       bumpTiling: 3,
       ...FINISH_VALUES.Matte,
       clearcoat: 0.53,
@@ -382,6 +392,36 @@ const BASE_PANEL = {
     options: ['Flag', 'Poster', 'Original', 'Face', 'Card'],
     default: 'Card',
   },
+  /** the room: Dark, or a pale Light ground (sets the Render background, exposure and environment) */
+  theme: {
+    type: 'select' as const,
+    options: ['Dark', 'Light'],
+    default: 'Dark',
+  },
+  /** Card mode: dragging the card spins it (and it settles back), or moves the camera, which stays put */
+  drag: {
+    type: 'select' as const,
+    options: ['Spin card', 'Move camera'],
+    default: 'Spin card',
+  },
+  /** Card mode: One is just the card; Stack arranges copies of it (set up under Stack) */
+  cards: {
+    type: 'select' as const,
+    options: ['One', 'Stack'],
+    default: 'One',
+  },
+  stack: {
+    shape: {
+      type: 'select' as const,
+      options: STACK_OPTIONS.filter((o) => o !== 'Single'),
+      // a stack is always on the move: through every formation in turn
+      default: 'Cycle',
+    },
+    count: [32, 2, MAX_PLATES, 1],
+    twist: [0.5, 0, 1, 0.01],
+    spacing: [1.5, 0.3, 6, 0.1],
+    flow: [1, 0, 3, 0.01],
+  },
   hands: false,
   cinematic: false,
   stickers: {
@@ -393,7 +433,7 @@ const BASE_PANEL = {
       options: ['Printed', 'Etched', 'Etched + filled'],
       default: 'Etched',
     },
-    etchDepth: [0.15, 0, 1, 0.01],
+    etchDepth: [0.04, 0, 1, 0.01],
     etchBevel: [0.5, 0.5, 8, 0.1],
     corner: [0.04, 0, 0.3, 0.005],
     shotLength: [2.2, 0.8, 6, 0.1],
@@ -424,7 +464,7 @@ const BASE_PANEL = {
     clearcoat: [0.53, 0, 1, 0.01],
     coatRoughness: [0.7, 0, 1, 0.01],
     sheen: [0.7, 0, 1, 0.01],
-    bump: [0.5, 0, 3, 0.01],
+    bump: [0.15, 0, 3, 0.01],
     bumpTiling: [3, 1, 12, 0.5],
     uploadBump: { type: 'action' as const, label: 'Upload bump map' },
   },
@@ -508,13 +548,14 @@ const BASE_PANEL = {
   poke: { type: 'action' as const, label: 'Poke' },
 } satisfies DialConfig;
 
-// a link's mode brings its hang preset with it; the link's own values win
+// a link's mode and theme bring their settings with them; the link's own values win
 const PANEL = withUrlDefaults(BASE_PANEL, (url) => {
   const bundle = typeof url.mode === 'string' ? MODE_VALUES[url.mode] : undefined;
-  if (!bundle) return {};
-  return Object.fromEntries(
-    Object.entries(bundle).map(([k, v]) => [`physics.${k}`, v as string | number | boolean]),
-  );
+  const theme = typeof url.theme === 'string' ? THEME_VALUES[url.theme] : undefined;
+  return Object.fromEntries([
+    ...Object.entries(bundle ?? {}).map(([k, v]) => [`physics.${k}`, v as string | number | boolean]),
+    ...Object.entries(theme ?? {}).map(([k, v]) => [`render.${k}`, v]),
+  ]);
 });
 /** the panel's own defaults: the URL only carries what differs from these */
 const PANEL_DEFAULTS = panelDefaults(BASE_PANEL);
@@ -748,6 +789,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
+  // theme sets the room's render values, which the Render sliders can then fine-tune
+  const theme = params.theme;
+  const skipTheme = useRef(true);
+  useEffect(() => {
+    if (skipTheme.current) {
+      skipTheme.current = false;
+      return;
+    }
+    const bundle = THEME_VALUES[theme];
+    if (bundle) dial.setValues({ render: bundle } as never);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [theme]);
+
   const preset = params.material.preset;
   const skipPreset = useRef(true);
   useEffect(() => {
@@ -762,7 +816,9 @@ export default function App() {
     // `finish`, the finish effect would fire next render and clobber those
     // overrides — skip that one run.
     if (bundle.material.finish !== params.material.finish) skipFinish.current = true;
-    dial.setValues({ material: bundle.material, render: bundle.render } as never);
+    // presets bring their own render settings, but the room stays as the theme set it
+    const render = { ...bundle.render, ...THEME_VALUES[params.theme] };
+    dial.setValues({ material: bundle.material, render } as never);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preset]);
 
