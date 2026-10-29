@@ -6,6 +6,7 @@ import { STICKER_SHEET } from './stickers.ts';
 import { MAX_PLATES, STACK_OPTIONS } from './cardStack.ts';
 import { ENGINE_AVAILABLE, ENGINE_RANDOM, ENGINE_SYSTEMS } from './engineArt.ts';
 import { irrelevantControls, useHiddenControls } from './panelVisibility.ts';
+import { LIGHTING } from './lighting.ts';
 import { withUrlDefaults, panelDefaults, flattenValues, writeUrl } from './urlState.ts';
 
 const PERFORMANCE_KEY = 'holocloth.performance';
@@ -403,6 +404,12 @@ const BASE_PANEL = {
     options: ['Dark', 'Light'],
     default: 'Dark',
   },
+  /** the lights: Studio is the original; the others are other rooms and rigs to try */
+  lighting: {
+    type: 'select' as const,
+    options: [...LIGHTING],
+    default: 'Studio',
+  },
   /** Card mode: dragging the card spins it (and it settles back), or moves the camera, which stays put */
   drag: {
     type: 'select' as const,
@@ -564,6 +571,8 @@ const BASE_PANEL = {
     background: { type: 'color' as const, default: RENDER_DEFAULTS.background },
     exposure: [RENDER_DEFAULTS.exposure, 0.2, 2.5, 0.01],
     environment: [RENDER_DEFAULTS.environment, 0, 3, 0.01],
+    /** turns the lighting round the card, sliding its reflections across the metal */
+    lightAngle: [0, -180, 180, 1],
     bloom: [RENDER_DEFAULTS.bloom, 0, 1.2, 0.01],
     bloomThreshold: [RENDER_DEFAULTS.bloomThreshold, 0, 2, 0.01],
     noise: [RENDER_DEFAULTS.noise, 0, 0.6, 0.005],

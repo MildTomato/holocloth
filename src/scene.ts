@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { Lighting } from './lighting.ts';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
@@ -35,6 +35,8 @@ export interface HoloParams {
   performance: string;
   /** webcam hands hold the poster's corners */
   hands: boolean;
+  /** the lighting setup: Studio (the original), Softbox, Strips, Window, Neon, Ring or Sunset */
+  lighting?: string;
   /** Flag / Poster / Original / Face / Card */
   mode: string;
   /** the card's cinematic reel: cuts between raking shots with a light sweep */
@@ -130,6 +132,8 @@ export interface HoloParams {
     background: string;
     exposure: number;
     environment: number;
+    /** turns the lighting setup round the card, degrees */
+    lightAngle?: number;
     bloom: number;
     bloomThreshold: number;
     noise: number;
@@ -266,6 +270,9 @@ export class HoloApp {
   private drama = 0.7;
   /** the reel's strip light, placed per shot so its reflection sweeps the face */
   private cineLight: THREE.RectAreaLight | null = null;
+  private lighting: Lighting;
+  /** the direct lights, turned with the environment by Light Angle */
+  private lightRig = new THREE.Group();
   private rectLightsReady = false;
   private clothGeometry!: THREE.BufferGeometry;
   private holoUniforms: HoloUniforms;
@@ -354,20 +361,12 @@ export class HoloApp {
     this.camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 200);
     this.camera.position.set(...BAKED_POSE.camera);
 
-    // image-based lighting from a neutral studio room
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environment = envTex;
-    pmrem.dispose();
-
-    // accent rims for specular interest — cool one side, warm the other
-    const rimA = new THREE.DirectionalLight(0x7fd4ff, 1.1);
-    rimA.position.set(-4, 2.5, -3);
-    const rimB = new THREE.DirectionalLight(0xff9ad5, 0.9);
-    rimB.position.set(4.5, -1.5, -2.5);
-    const key = new THREE.DirectionalLight(0xffffff, 0.7);
-    key.position.set(1.5, 3, 4);
-    this.scene.add(rimA, rimB, key);
+    // image-based lighting and direct lights, by setup (Studio: a neutral
+    // room, a cool rim, a warm rim and a white key)
+    this.lighting = new Lighting(this.renderer);
+    this.scene.environment = this.lighting.use('Studio');
+    this.lightRig.add(...this.lighting.lights);
+    this.scene.add(this.lightRig);
 
     // surface layer (uploaded graphics) + cloth
     this.surface = new SurfaceLayer();
@@ -523,6 +522,11 @@ export class HoloApp {
     // material.envMapIntensity is ignored when lighting comes from
     // scene.environment — the renderer reads scene.environmentIntensity
     this.scene.environmentIntensity = p.render.environment;
+    if ((p.lighting ?? 'Studio') !== this.lighting.current) this.scene.environment = this.lighting.use(p.lighting ?? 'Studio');
+    // turning the setup round the card slides its reflections across the metal
+    const turn = THREE.MathUtils.degToRad(p.render.lightAngle ?? 0);
+    this.scene.environmentRotation.y = turn;
+    this.lightRig.rotation.y = turn;
 
     const u = this.holoUniforms;
     u.uHoloIntensity.value = p.material.holoIntensity;
@@ -1736,6 +1740,7 @@ export class HoloApp {
   dispose() {
     this.disposed = true;
     this.plateArt?.dispose();
+    this.lighting.dispose();
     this.faceTracker?.stop();
     this.handTracker?.stop();
     this.renderer.setAnimationLoop(null);
