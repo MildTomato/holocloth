@@ -99,8 +99,10 @@ export interface HoloParams {
     pattern: string;
     /** Flower: which flower is set in type */
     flower?: string;
-    /** Engine: which Visual Engine system draws the artwork */
+    /** Engine: which Visual Engine system draws the artwork, or Random layers */
     engine?: string;
+    /** Engine Random: how many layers */
+    layers?: number;
     /** Flower: glyph size, Small to Huge */
     type?: string;
     /** Flower: set in type (ASCII) or dithered (Atkinson, Bayer, Halftone) */
@@ -562,7 +564,7 @@ export class HoloApp {
       ? ['Generated', g.rows, g.depth, g.fill, g.endCircles, g.guides, g.seed].join('|')
       : g.pattern === 'Growth'
         ? ['Growth', g.steps, g.guides].join('|')
-        : g.pattern === 'Engine' ? `Engine|${g.engine}|${g.seed}`
+        : g.pattern === 'Engine' ? `Engine|${g.engine}|${g.seed}|${g.layers}`
         : g.pattern === 'Flower' ? `Flower|${g.flower}|${g.style}|${g.type}|${this.flowerVersion}`
         : g.pattern === 'Bars' ? 'Bars' : 'Original';
     if (key === this.gridKey) return;
@@ -590,9 +592,9 @@ export class HoloApp {
   private async generateGridArt(g: HoloParams['grid']) {
     const field = await (this.gridField ??= fetchDataUrl('/artwork/field.png'));
     if (g.pattern === 'Engine') {
-      const linework = await engineLinework(g.engine ?? 'Twist Wireframe', Math.round(g.seed), {
+      const linework = await engineLinework(g.engine ?? 'Random', Math.round(g.seed), {
         x: ASCII.x0, y: ASCII.y0, w: ASCII.x1 - ASCII.x0, h: ASCII.y1 - ASCII.y0,
-      });
+      }, Math.round(g.layers ?? 3));
       return loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pageWith(linework, field))}`);
     }
     if (g.pattern === 'Flower') {

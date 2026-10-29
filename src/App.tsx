@@ -4,7 +4,7 @@ import { useDialKitController, DialRoot, DialStore, type DialConfig } from 'dial
 import { HoloApp, type HoloParams, type ImagesState } from './scene.ts';
 import { STICKER_SHEET } from './stickers.ts';
 import { MAX_PLATES, STACK_OPTIONS } from './cardStack.ts';
-import { ENGINE_AVAILABLE, ENGINE_SYSTEMS } from './engineArt.ts';
+import { ENGINE_AVAILABLE, ENGINE_RANDOM, ENGINE_SYSTEMS } from './engineArt.ts';
 import { withUrlDefaults, panelDefaults, flattenValues, writeUrl } from './urlState.ts';
 
 const PERFORMANCE_KEY = 'holocloth.performance';
@@ -482,9 +482,11 @@ const BASE_PANEL = {
     /** Engine: which Visual Engine system draws the artwork (Seed varies it) */
     engine: {
       type: 'select' as const,
-      options: Object.keys(ENGINE_SYSTEMS),
-      default: 'Twist Wireframe',
+      options: [ENGINE_RANDOM, ...Object.keys(ENGINE_SYSTEMS)],
+      default: ENGINE_RANDOM,
     },
+    /** Engine Random: how many layers */
+    layers: [3, 1, 6, 1],
     /** Flower: which flower is set in type */
     flower: {
       type: 'select' as const,
