@@ -188,6 +188,9 @@ const FACE_ON = new THREE.Quaternion();
 const ONE = new THREE.Vector3(1, 1, 1);
 /** seconds to pull a plate out, or put it back */
 const PULL = 1.1;
+/** how long a hovered plate takes to pop out (s), and how far: a fraction of its short side */
+const HOVER = 0.18;
+const POP = 0.18;
 
 const ease = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2);
 
@@ -310,10 +313,32 @@ export class StackAnimator {
   /** the plate pulled out to the front, if any, and how far out each plate is (0..1) */
   private focus: number | null = null;
   private out = new Float32Array(MAX_PLATES);
+  /** the plate under the pointer, and how far each has popped out (0..1) */
+  private hover: number | null = null;
+  private lift = new Float32Array(MAX_PLATES);
   /** each formation's clearing spread, for the settings it was worked out at */
   private spreads = new Map<string, number>();
   /** where a pulled-out plate is shown: clear in front of the formation */
   readonly front = FRONT.clone();
+  /**
+   * Or where it's presented instead — in front of the viewer, square to
+   * them (the stack's own space) — when the camera is theirs to place.
+   */
+  private present: { position: THREE.Vector3; quaternion: THREE.Quaternion; scale: number } | null = null;
+  /** how far the formation reaches from its middle, plates included (stack space) */
+  reach = 0;
+
+  /** Present a pulled-out plate at this pose and size (stack space) rather than the front; null for the front. */
+  presentAt(position: THREE.Vector3 | null, quaternion?: THREE.Quaternion, scale = 1) {
+    if (!position || !quaternion) {
+      this.present = null;
+      return;
+    }
+    this.present ??= { position: new THREE.Vector3(), quaternion: new THREE.Quaternion(), scale: 1 };
+    this.present.position.copy(position);
+    this.present.quaternion.copy(quaternion);
+    this.present.scale = scale;
+  }
 
   /** Pull plate i out to the front, face-on; null sends it back into the formation. */
   setFocus(i: number | null) {
@@ -322,6 +347,11 @@ export class StackAnimator {
 
   get focused() {
     return this.focus;
+  }
+
+  /** The plate under the pointer pops out a little; null lets it settle back. */
+  setHover(i: number | null) {
+    this.hover = i;
   }
 
   /** true when every plate sits on the single card (draw the plain card instead) */
@@ -398,6 +428,7 @@ export class StackAnimator {
       deepest = Math.max(deepest, pb.z);
     }
     reach += plateR;
+    this.reach = reach;
     // tilted plates can reach a half-diagonal past their centres
     this.front.set(0, 0, Math.max(FRONT.z, deepest + plateR + 0.1));
 
@@ -425,6 +456,9 @@ export class StackAnimator {
       // a plate pulled out (or on its way back) leaves its slot for the front
       const target = i === this.focus ? 1 : 0;
       const o = (this.out[i] += THREE.MathUtils.clamp(target - this.out[i], -dt / PULL, dt / PULL));
+      // hovered: eased a little way out of the formation, within its own plane
+      const lifted = (this.lift[i] += THREE.MathUtils.clamp((i === this.hover && o === 0 ? 1 : 0) - this.lift[i], -dt / HOVER, dt / HOVER));
+      if (lifted > 0) this.popOut(mb, ease(lifted) * Math.min(w, h) * POP);
       if (o > 0) this.pullOut(mb, ease(o), reach);
       for (const mesh of meshes) mesh.setMatrixAt(i, mb);
     }
@@ -434,6 +468,21 @@ export class StackAnimator {
       // recomputed when a raycast needs it
       mesh.boundingSphere = null;
     }
+  }
+
+  /**
+   * A plate nudged `by` out of the formation: within its own plane, away
+   * from the middle (out of a ring, off the end of a fan), never into its
+   * neighbours.
+   */
+  private popOut(m: THREE.Matrix4, by: number) {
+    m.decompose(pa, qa, sa);
+    const nrm = Z.clone().applyQuaternion(qa);
+    const away = pa.clone().addScaledVector(nrm, -pa.dot(nrm));
+    // a plate on the axis (a straight stack) pops toward the viewer instead
+    if (away.lengthSq() < 1e-4) away.copy(nrm);
+    pa.addScaledVector(away.normalize(), by);
+    m.compose(pa, qa, sa);
   }
 
   /**
@@ -452,12 +501,17 @@ export class StackAnimator {
     away.normalize();
     // far enough that the plate, at any angle, can't reach the formation
     const side = pa.clone().addScaledVector(away, reach + Math.hypot(sa.x, sa.y) + 0.2);
-    const sideFront = side.clone().setZ(Math.max(side.z, this.front.z));
+    // where it ends up, facing which way: the front, or presented to the viewer
+    const dest = this.present?.position ?? this.front;
+    const destQ = this.present?.quaternion ?? FACE_ON;
+    // out toward the viewer (along the final facing) to the destination's depth, still clear to the side
+    const toward = Z.clone().applyQuaternion(destQ);
+    const sideFront = side.clone().addScaledVector(toward, Math.max(0, dest.clone().sub(side).dot(toward)));
     const seg = (a: number, b: number) => ease(THREE.MathUtils.clamp((k - a) / (b - a), 0, 1));
     const s1 = seg(0, 0.35), s2 = seg(0.35, 0.7), s3 = seg(0.7, 1);
-    pb.copy(pa).lerp(side, s1).lerp(sideFront, s2).lerp(this.front, s3);
-    qb.copy(qa).slerp(FACE_ON, s2);
-    sb.copy(sa).lerp(ONE, s2);
+    pb.copy(pa).lerp(side, s1).lerp(sideFront, s2).lerp(dest, s3);
+    qb.copy(qa).slerp(destQ, s2);
+    sb.copy(sa).lerp(ONE, s2).multiplyScalar(THREE.MathUtils.lerp(1, this.present?.scale ?? 1, s3));
     m.compose(pb, qb, sb);
   }
 }

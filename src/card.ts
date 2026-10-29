@@ -226,6 +226,35 @@ export class MetalCard {
     if (i !== null) this.vel = { x: 0, y: 0 };
   }
 
+  /**
+   * Present the pulled-out plate at a world pose — in front of the camera,
+   * square to it — instead of the formation's front; null for the front.
+   */
+  presentPlate(position: THREE.Vector3 | null, quaternion?: THREE.Quaternion, scale = 1) {
+    if (!position || !quaternion) {
+      this.stack.presentAt(null);
+      return;
+    }
+    this.group.updateWorldMatrix(true, false);
+    const inv = this.group.matrixWorld.clone().invert();
+    const local = position.clone().applyMatrix4(inv);
+    const groupQ = new THREE.Quaternion();
+    this.group.getWorldQuaternion(groupQ);
+    this.stack.presentAt(local, groupQ.invert().multiply(quaternion), scale);
+  }
+
+  /** The formation's middle and how far it reaches, in world space — what a presented plate must clear. */
+  formationBounds(centre: THREE.Vector3) {
+    this.group.updateWorldMatrix(true, false);
+    centre.setFromMatrixPosition(this.group.matrixWorld);
+    return this.stack.reach;
+  }
+
+  /** The plate under the pointer (null: none) pops out a little. */
+  hoverPlate(i: number | null) {
+    this.stack.setHover(i);
+  }
+
   get focusedPlate() {
     return this.stack.focused;
   }

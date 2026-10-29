@@ -160,6 +160,29 @@ const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
  */
 const PLATE_ART = { count: 8, w: 1000, h: 1500 };
 
+/** how far (px) the pointer can stray from a hovered plate before it settles back */
+const HOVER_HOLD_PX = 40;
+
+/** A view from the link (?cam=x,y,z&target=x,y,z), if it has a whole one. */
+function readCameraUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const vec = (key: string) => {
+    const n = (params.get(key) ?? '').split(',').map(Number);
+    return n.length === 3 && n.every(Number.isFinite) ? new THREE.Vector3(n[0], n[1], n[2]) : null;
+  };
+  const cam = vec('cam'), target = vec('target');
+  return cam && target ? { cam, target } : null;
+}
+
+/** The view into the link, leaving every other param as it is. */
+function writeCameraUrl(cam: THREE.Vector3, target: THREE.Vector3) {
+  const params = new URLSearchParams(window.location.search);
+  const fmt = (v: THREE.Vector3) => [v.x, v.y, v.z].map((n) => +n.toFixed(3)).join(',');
+  params.set('cam', fmt(cam));
+  params.set('target', fmt(target));
+  window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}${window.location.hash}`);
+}
+
 const flowerSrc = (name: string) =>
   `/artwork/flowers/${name.toLowerCase()}.jpg`;
 
@@ -271,6 +294,10 @@ export class HoloApp {
   /** the reel's strip light, placed per shot so its reflection sweeps the face */
   private cineLight: THREE.RectAreaLight | null = null;
   private lighting: Lighting;
+  private cameraUrlTimer: number | null = null;
+  /** the plate held as hovered, and where the pointer last touched it (NDC) */
+  private hovered: number | null = null;
+  private hoverAt = new THREE.Vector2();
   /** the direct lights, turned with the environment by Light Angle */
   private lightRig = new THREE.Group();
   private rectLightsReady = false;
@@ -394,6 +421,7 @@ export class HoloApp {
     const canvas = this.renderer.domElement;
     canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointermove', this.onPointerMove);
+    canvas.addEventListener('pointerleave', this.onPointerLeave);
     canvas.addEventListener('pointerup', this.onPointerUp);
     canvas.addEventListener('pointercancel', this.onPointerUp);
     canvas.addEventListener('wheel', this.onWheel, { passive: false });
@@ -407,7 +435,23 @@ export class HoloApp {
     this.controls.minDistance = 1.6;
     this.controls.maxDistance = 30;
     this.controls.target.set(...BAKED_POSE.target);
+    // a link can carry a view: ?cam=x,y,z&target=x,y,z
+    const view = readCameraUrl();
+    if (view) {
+      this.camera.position.copy(view.cam);
+      this.controls.target.copy(view.target);
+    }
     this.controls.update();
+    // and moving the view writes it back, once it settles — only your own
+    // moves: the reel and a focused plate drive the camera without controls
+    this.controls.addEventListener('change', () => {
+      if (this.cameraUrlTimer !== null) window.clearTimeout(this.cameraUrlTimer);
+      this.cameraUrlTimer = window.setTimeout(() => {
+        this.cameraUrlTimer = null;
+        if (this.cine || this.plateCam.k > 0 || this.disposed) return;
+        writeCameraUrl(this.camera.position, this.controls.target);
+      }, 400);
+    });
 
     // post: MSAA + half-float HDR chain, bloom, tonemap+sRGB, grain
     const rt = new THREE.WebGLRenderTarget(width, height, {
@@ -1141,11 +1185,13 @@ export class HoloApp {
   }
 
   /**
-   * Pull a plate of the stack out to the front and move the camera in,
-   * square to it; null puts it back and returns the camera to where it was.
+   * Pull a plate of the stack out and show it square-on, centred: by
+   * moving the camera in to it, or — under Move camera, where the view is
+   * yours — by bringing the plate to the camera. Null puts it back (and the
+   * camera, if it moved, returns to where it was).
    */
   private focusPlate(plate: number | null) {
-    if (plate !== null && this.card.focusedPlate === null && this.plateCam.k === 0) {
+    if (plate !== null && this.card.focusedPlate === null && this.plateCam.k === 0 && this.params?.drag !== 'Move camera') {
       this.plateCam.rest = {
         position: this.camera.position.clone(),
         target: this.controls.target.clone(),
@@ -1161,6 +1207,25 @@ export class HoloApp {
     const focused = this.card.focusedPlate !== null;
     // anything that ends the stack, or the reel taking the camera, sends it back
     if (focused && (!this.cardMode || !this.card.stacked || this.cine)) this.card.focusPlate(null);
+    // Move camera: the plate comes to the view — centred, square to it,
+    // filling most of the height — and follows it if you orbit
+    if (this.params?.drag === 'Move camera' && !c.rest) {
+      const { w, h } = this.card.dims;
+      const half = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
+      const fill = Math.max(h / 2, w / 2 / this.camera.aspect) / half / 0.8;
+      const dir = new THREE.Vector3();
+      this.camera.getWorldDirection(dir);
+      // in front of the whole formation, so nothing passes over it: if it
+      // has to come nearer than its framing distance, it's made smaller to
+      // match, so it fills the same part of the view
+      const centre = new THREE.Vector3();
+      const reach = this.card.formationBounds(centre);
+      const clear = centre.sub(this.camera.position).dot(dir) - reach - 0.15;
+      const dist = THREE.MathUtils.clamp(clear, 0.4, fill);
+      this.card.presentPlate(this.camera.position.clone().addScaledVector(dir, dist), this.camera.quaternion, dist / fill);
+    } else {
+      this.card.presentPlate(null);
+    }
     const goal = this.card.focusedPlate !== null ? 1 : 0;
     // at rest there is nothing to do; held on a plate, keep following it as it floats
     if (!c.rest || (c.k === 0 && goal === 0)) return;
@@ -1184,7 +1249,8 @@ export class HoloApp {
   /** Any part of the card under the pointer — for spinning it. */
   private raycastCard(): THREE.Intersection | null {
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
-    return this.raycaster.intersectObject(this.card.group, true)[0] ?? null;
+    // raycasts see hidden meshes too: skip the plain card while the stack shows, and vice versa
+    return this.raycaster.intersectObject(this.card.group, true).find((h) => h.object.visible) ?? null;
   }
 
   private startCardSpin(e: PointerEvent) {
@@ -1605,6 +1671,32 @@ export class HoloApp {
     }
   };
 
+  /** off the canvas: nothing is hovered */
+  private onPointerLeave = () => {
+    this.hovered = null;
+    this.card.hoverPlate(null);
+  };
+
+  /**
+   * The hovered plate, held: popping out slides it from under the pointer,
+   * and letting go then would make it flicker in and out. It stays until
+   * the pointer reaches another plate or moves well away from where it last
+   * touched this one.
+   */
+  private stickyHover(under: number | null) {
+    const px = this.pointerNdc.clone();
+    if (under !== null) {
+      this.hovered = under;
+      this.hoverAt.copy(px);
+    } else if (this.hovered !== null) {
+      const { width, height } = this.renderer.domElement.getBoundingClientRect();
+      const moved = Math.hypot(((px.x - this.hoverAt.x) * width) / 2, ((px.y - this.hoverAt.y) * height) / 2);
+      const gone = !this.cardMode || !this.card.stacked || this.cine || this.card.dragging || this.hovered === this.card.focusedPlate;
+      if (moved > HOVER_HOLD_PX || gone) this.hovered = null;
+    }
+    return this.hovered;
+  }
+
   private onPointerUp = (e: PointerEvent) => {
     const click = this.plateClick;
     if (click && e.pointerId === click.id) {
@@ -1719,8 +1811,14 @@ export class HoloApp {
     if (!this.grabbing && !this.draggingDecal && !this.pickingFocus && !this.spaceHeld &&
         this.perfProfile !== 'Low') {
       const hit = this.cardMode ? this.raycastCard() : this.raycastCloth();
+      // a plate of the stack under the pointer pops out a little, and can be clicked
+      // (the pulled-out plate is already as far out as it goes)
+      const plate = this.cardMode && this.card.stacked && !this.cine && !this.card.dragging ? this.card.plateAt(hit) : null;
+      const hovered = this.stickyHover(plate !== null && plate !== this.card.focusedPlate ? plate : null);
+      this.card.hoverPlate(hovered);
       let cursor = 'default';
-      if (hit) {
+      if (hovered !== null) cursor = 'pointer';
+      else if (hit) {
         cursor = this.editMode
           ? hit.uv && this.surface.hitTest(hit.uv.x, hit.uv.y) ? 'move' : 'default'
           : 'grab';
@@ -1739,6 +1837,7 @@ export class HoloApp {
 
   dispose() {
     this.disposed = true;
+    if (this.cameraUrlTimer !== null) window.clearTimeout(this.cameraUrlTimer);
     this.plateArt?.dispose();
     this.lighting.dispose();
     this.faceTracker?.stop();
@@ -1748,6 +1847,7 @@ export class HoloApp {
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.onPointerDown);
     canvas.removeEventListener('pointermove', this.onPointerMove);
+    canvas.removeEventListener('pointerleave', this.onPointerLeave);
     canvas.removeEventListener('pointerup', this.onPointerUp);
     canvas.removeEventListener('pointercancel', this.onPointerUp);
     canvas.removeEventListener('wheel', this.onWheel);
