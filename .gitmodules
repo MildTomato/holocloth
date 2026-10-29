@@ -1,0 +1,3 @@
+[submodule "visual-engine-generator"]
+	path = visual-engine-generator
+	url = https://github.com/Nadiasarm09/visual-engine-generator.git
