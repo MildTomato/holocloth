@@ -329,6 +329,28 @@ export class MetalCard {
     return { u: local.x / this.size.w, v: local.y / this.size.h };
   }
 
+  /**
+   * The outline of each plate that's showing (or of the card alone), as
+   * world-space points round its edge on the slab's middle plane.
+   */
+  outlines(): THREE.Vector3[][] {
+    this.group.updateWorldMatrix(true, true);
+    const { w, h } = this.size;
+    const ring = cardOutline(w, h, this.corner).getPoints(CORNER_SEGMENTS);
+    const n = this.stacked ? this.stackParams.count : 1;
+    const out: THREE.Vector3[][] = [];
+    for (let i = 0; i < n; i++) {
+      if (this.stacked) {
+        this.stackSlab.getMatrixAt(i, plateM);
+        plateM.premultiply(this.group.matrixWorld);
+      } else {
+        plateM.copy(this.slab.matrixWorld);
+      }
+      out.push(ring.map((p) => new THREE.Vector3(p.x, p.y, 0).applyMatrix4(plateM)));
+    }
+    return out;
+  }
+
   /** The solid metal that's showing — the card, or the stack's plates — for aiming rays at. */
   get solid(): THREE.Object3D {
     return this.stacked ? this.stackSlab : this.slab;

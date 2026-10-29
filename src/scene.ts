@@ -1229,6 +1229,47 @@ export class HoloApp {
     this.card.setTextures(this.surface.texture, this.surface.stickerTexture);
   }
 
+  /**
+   * The card, or the stack's plates, as outlines seen from this camera: an
+   * SVG at the screen's size, one named path per plate, for Figma. It's
+   * downloaded and copied, so it can be pasted straight onto a canvas.
+   */
+  exportOutlines() {
+    if (!this.cardMode) {
+      window.alert('Outlines export the card and its stacks: set Mode to Card.');
+      return;
+    }
+    const w = this.host.clientWidth || window.innerWidth;
+    const h = this.host.clientHeight || window.innerHeight;
+    this.camera.updateMatrixWorld();
+    const v = new THREE.Vector3();
+    const paths: string[] = [];
+    this.card.outlines().forEach((ring, i) => {
+      let d = '';
+      for (const p of ring) {
+        v.copy(p).project(this.camera);
+        if (v.z < -1 || v.z > 1) return; // behind the camera: left out
+        d += `${d ? 'L' : 'M'}${(((v.x + 1) / 2) * w).toFixed(2)} ${(((1 - v.y) / 2) * h).toFixed(2)}`;
+      }
+      paths.push(`<path id="Plate ${i + 1}" d="${d}Z"/>`);
+    });
+    const bg = `#${this.background.getHexString()}`;
+    const ink = this.background.getHSL({ h: 0, s: 0, l: 0 }).l < 0.5 ? '#ffffff' : '#111111';
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+  <rect id="Background" width="${w}" height="${h}" fill="${bg}"/>
+  <g id="Plates" fill="none" stroke="${ink}" stroke-width="1" stroke-linejoin="round">
+    ${paths.join('\n    ')}
+  </g>
+</svg>
+`;
+    navigator.clipboard?.writeText(svg).catch(() => {});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    a.download = `holocloth-outlines-${new Date().toISOString().replace(/[:.]/g, '-')}.svg`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
   /** Render one frame at high resolution and download it as a PNG. */
   exportPNG(transparent = false) {
     const w = this.host.clientWidth || window.innerWidth;

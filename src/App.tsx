@@ -566,6 +566,7 @@ const BASE_PANEL = {
   },
   exportPNG: { type: 'action' as const, label: 'Export PNG' },
   exportPNGClear: { type: 'action' as const, label: 'Export PNG (no background)' },
+  exportOutlines: { type: 'action' as const, label: 'Export outlines (SVG)' },
   resetCloth: { type: 'action' as const, label: 'Reset cloth' },
   poke: { type: 'action' as const, label: 'Poke' },
 } satisfies DialConfig;
@@ -608,6 +609,7 @@ export default function App() {
         else if (name === 'poke') app.poke();
         else if (name === 'exportPNG') app.exportPNG(false);
         else if (name === 'exportPNGClear') app.exportPNG(true);
+        else if (name === 'exportOutlines') app.exportOutlines();
         else if (name === 'addImage') decalInputRef.current?.click();
         else if (name === 'makeCloth') clothInputRef.current?.click();
         else if (name === 'uploadBump') bumpInputRef.current?.click();
