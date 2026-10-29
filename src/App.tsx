@@ -4,6 +4,7 @@ import { useDialKitController, DialRoot, DialStore, type DialConfig } from 'dial
 import { HoloApp, type HoloParams, type ImagesState } from './scene.ts';
 import { STICKER_SHEET } from './stickers.ts';
 import { MAX_PLATES, STACK_OPTIONS } from './cardStack.ts';
+import { ENGINE_AVAILABLE, ENGINE_SYSTEMS } from './engineArt.ts';
 import { withUrlDefaults, panelDefaults, flattenValues, writeUrl } from './urlState.ts';
 
 const PERFORMANCE_KEY = 'holocloth.performance';
@@ -474,8 +475,15 @@ const BASE_PANEL = {
   grid: {
     pattern: {
       type: 'select' as const,
-      options: ['Original', 'Generated', 'Growth', 'Bars', 'Flower'],
+      // Engine only where the Visual Engine submodule is checked out
+      options: ['Original', 'Generated', 'Growth', 'Bars', 'Flower', ...(ENGINE_AVAILABLE ? ['Engine'] : [])],
       default: 'Growth',
+    },
+    /** Engine: which Visual Engine system draws the artwork (Seed varies it) */
+    engine: {
+      type: 'select' as const,
+      options: Object.keys(ENGINE_SYSTEMS),
+      default: 'Twist Wireframe',
     },
     /** Flower: which flower is set in type */
     flower: {
@@ -601,8 +609,10 @@ export default function App() {
         const app = appRef.current;
         if (!app) return;
         if (name === 'shuffle') {
+          // a new seed; the Engine keeps its system, anything else becomes a generated grid
+          const engine = dial.getValues().grid.pattern === 'Engine';
           dial.setValues({
-            grid: { pattern: 'Generated', seed: 1 + Math.floor(Math.random() * 999) },
+            grid: { pattern: engine ? 'Engine' : 'Generated', seed: 1 + Math.floor(Math.random() * 999) },
           } as never);
         } else if (name === 'clearStickers') app.clearStickers();
         else if (name === 'resetCloth') app.resetCloth();

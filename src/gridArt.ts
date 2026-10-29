@@ -427,6 +427,11 @@ export function ditherSvg(lum: Float32Array, cols: number, rows: number, fieldDa
   return pageSvg(ditherLinework(lum, cols, rows, style, size), fieldDataUrl);
 }
 
+/** Any linework on the page: the field, the margin's marks, and the linework in ink. */
+export function pageWith(linework: string, fieldDataUrl: string): string {
+  return pageSvg(linework, fieldDataUrl);
+}
+
 function pageSvg(linework: string, fieldDataUrl: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>

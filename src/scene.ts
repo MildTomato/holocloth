@@ -12,7 +12,8 @@ import { SurfaceLayer, type DecalItem } from './decals.ts';
 import { normalMapFromImage } from './textures.ts';
 import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
-import { gridSvg, growthSvg, barsSvg, asciiSvg, asciiGrid, ditherSvg, ditherGrid, sampleLuminance, loadImage, fetchDataUrl } from './gridArt.ts';
+import { engineLinework } from './engineArt.ts';
+import { gridSvg, growthSvg, barsSvg, asciiSvg, asciiGrid, ditherSvg, ditherGrid, pageWith, ASCII, sampleLuminance, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
 import { MetalCard } from './card.ts';
 import type { StackParams } from './cardStack.ts';
@@ -98,6 +99,8 @@ export interface HoloParams {
     pattern: string;
     /** Flower: which flower is set in type */
     flower?: string;
+    /** Engine: which Visual Engine system draws the artwork */
+    engine?: string;
     /** Flower: glyph size, Small to Huge */
     type?: string;
     /** Flower: set in type (ASCII) or dithered (Atkinson, Bayer, Halftone) */
@@ -554,11 +557,12 @@ export class HoloApp {
    */
   private updateGridArt(g: HoloParams['grid']) {
     if (!g) return;
-    const generated = g.pattern === 'Generated' || g.pattern === 'Growth' || g.pattern === 'Bars' || g.pattern === 'Flower';
+    const generated = g.pattern === 'Generated' || g.pattern === 'Growth' || g.pattern === 'Bars' || g.pattern === 'Flower' || g.pattern === 'Engine';
     const key = g.pattern === 'Generated'
       ? ['Generated', g.rows, g.depth, g.fill, g.endCircles, g.guides, g.seed].join('|')
       : g.pattern === 'Growth'
         ? ['Growth', g.steps, g.guides].join('|')
+        : g.pattern === 'Engine' ? `Engine|${g.engine}|${g.seed}`
         : g.pattern === 'Flower' ? `Flower|${g.flower}|${g.style}|${g.type}|${this.flowerVersion}`
         : g.pattern === 'Bars' ? 'Bars' : 'Original';
     if (key === this.gridKey) return;
@@ -585,6 +589,12 @@ export class HoloApp {
 
   private async generateGridArt(g: HoloParams['grid']) {
     const field = await (this.gridField ??= fetchDataUrl('/artwork/field.png'));
+    if (g.pattern === 'Engine') {
+      const linework = await engineLinework(g.engine ?? 'Twist Wireframe', Math.round(g.seed), {
+        x: ASCII.x0, y: ASCII.y0, w: ASCII.x1 - ASCII.x0, h: ASCII.y1 - ASCII.y0,
+      });
+      return loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pageWith(linework, field))}`);
+    }
     if (g.pattern === 'Flower') {
       const src = this.flowerUpload ?? flowerSrc(g.flower ?? 'Tulip');
       const style = g.style ?? 'ASCII';
