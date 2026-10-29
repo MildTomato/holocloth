@@ -5,6 +5,7 @@ import { HoloApp, type HoloParams, type ImagesState } from './scene.ts';
 import { STICKER_SHEET } from './stickers.ts';
 import { MAX_PLATES, STACK_OPTIONS } from './cardStack.ts';
 import { ENGINE_AVAILABLE, ENGINE_RANDOM, ENGINE_SYSTEMS } from './engineArt.ts';
+import { irrelevantControls, useHiddenControls } from './panelVisibility.ts';
 import { withUrlDefaults, panelDefaults, flattenValues, writeUrl } from './urlState.ts';
 
 const PERFORMANCE_KEY = 'holocloth.performance';
@@ -440,6 +441,12 @@ const BASE_PANEL = {
     etchDepth: [0.04, 0, 1, 0.01],
     etchBevel: [0.5, 0.5, 8, 0.1],
     corner: [0.04, 0, 0.3, 0.005],
+    /** the back of the card (and every plate): a mirror polish, or brushed metal */
+    back: {
+      type: 'select' as const,
+      options: ['Mirror', 'Brushed'],
+      default: 'Mirror',
+    },
     shotLength: [2.2, 0.8, 6, 0.1],
     drama: [0.7, 0, 1, 0.01],
   },
@@ -637,6 +644,8 @@ export default function App() {
   );
 
   const params = dial.values;
+  // controls that do nothing as the panel is set stay out of sight
+  useHiddenControls('holocloth', irrelevantControls(params));
 
   const [, setImagesRev] = useState(0);
   const [faceStatus, setFaceStatus] = useState<string | null>(null);

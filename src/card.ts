@@ -57,10 +57,19 @@ export class MetalCard {
   private stack = new StackAnimator();
   private stackParams: StackParams = { shape: 'Single', count: 48, twist: 0.5, spacing: 0.4, flow: 0 };
   private front: THREE.MeshPhysicalMaterial;
+  private plateFront: THREE.MeshPhysicalMaterial;
+  /** a different artwork per plate, cycled through the stack; none = the card's */
+  private plateArt = {
+    uPlateArt: { value: null as THREE.DataArrayTexture | null },
+    uPlateArtCount: { value: 0 },
+    uPlateTexel: { value: new THREE.Vector2(1 / 1024, 1 / 1536) },
+  };
   private metal: THREE.MeshPhysicalMaterial;
   private edge: THREE.MeshPhysicalMaterial;
   private size = { w: 2, h: 3 };
   private corner = 0.04;
+  private backMirror = false;
+  private bump = 0;
   private stickerMap: { value: THREE.Texture };
   /** how the artwork's linework is applied: printed, or etched into the metal */
   private etch = {
@@ -87,84 +96,11 @@ export class MetalCard {
       iridescenceIOR: 1.4,
       iridescenceThicknessRange: [180, 520],
     });
-    this.front.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, this.etch, { uStickerMap: this.stickerMap });
-      // helpers go after map_pars_fragment, where the artwork's map sampler is declared
-      shader.fragmentShader = shader.fragmentShader.replace('#include <map_pars_fragment>', /* glsl */ `#include <map_pars_fragment>
-        uniform sampler2D uStickerMap;
-        uniform float uEtchMode;   // 0 printed, 1 etched (bare metal), 2 etched + filled
-        uniform float uEtchDepth;
-        uniform float uEtchBevel;  // groove shoulder width, in artwork texels
-        uniform vec2 uMapTexel;
-
-        // how much of the artwork's dark linework is under uv
-        float cardInkAt(vec2 uv) {
-          float lum = dot(texture2D(map, uv).rgb, vec3(0.299, 0.587, 0.114));
-          return 1.0 - smoothstep(0.12, 0.4, lum);
-        }
-
-        // tilt the normal by a height gradient measured across the artwork
-        // (per uv), not across screen pixels — smooth, so fine lines don't
-        // bead. The face is flat, so this tangent frame is exact.
-        vec3 cardEtchPerturb(vec3 surfPos, vec3 surfNorm, vec2 uv, vec2 dHduv) {
-          vec3 q0 = dFdx(surfPos), q1 = dFdy(surfPos);
-          vec2 st0 = dFdx(uv), st1 = dFdy(uv);
-          vec3 q1perp = cross(q1, surfNorm), q0perp = cross(surfNorm, q0);
-          vec3 T = q1perp * st0.x + q0perp * st1.x;
-          vec3 B = q1perp * st0.y + q0perp * st1.y;
-          float det = max(dot(T, T), dot(B, B));
-          float scale = det == 0.0 ? 0.0 : inversesqrt(det);
-          return normalize(surfNorm - (dHduv.x * T + dHduv.y * B) * scale);
-        }
-      `)
-        .replace('#include <map_fragment>', /* glsl */ `#include <map_fragment>
-          float cardSticker = 0.0;
-          float cardInk = 0.0;    // the artwork's linework
-          float cardEtchH = 0.0;  // groove depth, 0..1
-          vec2 cardEtchGrad = vec2(0.0);  // its slope across the artwork
-          bool cardEtched = uEtchMode > 0.5;
-          bool cardBare = cardEtched && uEtchMode < 1.5;
-          {
-            cardInk = cardInkAt(vMapUv);
-            if (cardEtched) {
-              // the groove's walls are as wide as the bevel: its slope is the
-              // change in ink across that width
-              vec2 o = uMapTexel * uEtchBevel;
-              float l = cardInkAt(vMapUv - vec2(o.x, 0.0)), r = cardInkAt(vMapUv + vec2(o.x, 0.0));
-              float d = cardInkAt(vMapUv - vec2(0.0, o.y)), u = cardInkAt(vMapUv + vec2(0.0, o.y));
-              cardEtchH = max(cardInk, 0.25 * (l + r + d + u));
-              cardEtchGrad = vec2(r - l, u - d) * 0.5;
-            }
-            // etched bare: the groove shows the plate itself, a cool silver,
-            // shadowed inside the cut so each line reads as one line
-            if (cardBare) {
-              float shade = 1.0 - 0.55 * cardEtchH * clamp(uEtchDepth * 1.5, 0.0, 1.0);
-              diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.55, 0.56, 0.6) * shade, cardInk);
-            }
-            // stickers sit on top of everything
-            vec4 stk = texture2D(uStickerMap, vMapUv);
-            cardSticker = stk.a;
-            diffuseColor.rgb = mix(diffuseColor.rgb, stk.rgb, stk.a);
-          }`)
-        // printed or filled ink is matte paint; a bare etched groove is frosted metal
-        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-          roughnessFactor = cardBare
-            ? mix(mix(roughnessFactor, 0.5, cardInk), 0.55, cardSticker * 0.5)
-            : mix(roughnessFactor, 0.55, max(cardInk, cardSticker * 0.5));`)
-        .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
-          metalnessFactor = mix(metalnessFactor, 0.0, cardBare ? cardSticker : max(cardInk, cardSticker));`)
-        // the groove: its shoulders bend the light, so the cut catches it as the card turns
-        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
-          if (cardEtched && uEtchDepth > 0.0) {
-            // a cut: height falls into the ink, so the slope points out of it
-            vec2 dHduv = -cardEtchGrad * uEtchDepth * 0.08 * (1.0 - cardSticker);
-            normal = cardEtchPerturb(-vViewPosition, normal, vMapUv, dHduv / uMapTexel);
-          }`)
-        .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>
-          #ifdef USE_IRIDESCENCE
-            material.iridescence *= 1.0 - max(cardInk, cardSticker);
-          #endif`);
-    };
+    this.front.onBeforeCompile = (shader) => this.patchFace(shader, false);
+    // the plates' face: the same, but each plate can carry its own artwork
+    this.plateFront = this.front.clone();
+    this.plateFront.onBeforeCompile = (shader) => this.patchFace(shader, true);
+    this.plateFront.customProgramCacheKey = () => 'card-plates';
     const metal = (this.metal = new THREE.MeshPhysicalMaterial({
       color: '#c3c8cf',
       metalness: 1,
@@ -186,7 +122,7 @@ export class MetalCard {
     this.slab = new THREE.Mesh(new THREE.ExtrudeGeometry(), [metal, this.edge]);
     this.face = new THREE.Mesh(new THREE.ShapeGeometry(), this.front);
     this.stackSlab = new THREE.InstancedMesh(this.slab.geometry, [metal, this.edge], MAX_PLATES);
-    this.stackFace = new THREE.InstancedMesh(this.face.geometry, this.front, MAX_PLATES);
+    this.stackFace = new THREE.InstancedMesh(this.face.geometry, this.plateFront, MAX_PLATES);
     for (const m of [this.stackSlab, this.stackFace]) {
       m.count = 0;
       m.visible = false;
@@ -361,12 +297,127 @@ export class MetalCard {
     return object === this.face || object === this.stackFace;
   }
 
+  /**
+   * The face's shading: the artwork's linework printed or etched, stickers
+   * over it. Plates can each take their own artwork (a texture array layer
+   * per plate); otherwise they share the card's.
+   */
+  private patchFace(shader: THREE.WebGLProgramParametersWithUniforms, plates: boolean) {
+    Object.assign(shader.uniforms, this.etch, this.plateArt, { uStickerMap: this.stickerMap });
+    if (plates) {
+      // each plate's own artwork: a layer of the texture array, by instance
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nflat varying float vPlate;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPlate = float(gl_InstanceID);');
+    }
+    // helpers go after map_pars_fragment, where the artwork's map sampler is declared
+    shader.fragmentShader = shader.fragmentShader.replace('#include <map_pars_fragment>', /* glsl */ `#include <map_pars_fragment>
+      uniform sampler2D uStickerMap;
+      uniform float uEtchMode;   // 0 printed, 1 etched (bare metal), 2 etched + filled
+      uniform float uEtchDepth;
+      uniform float uEtchBevel;  // groove shoulder width, in artwork texels
+      uniform vec2 uMapTexel;
+      ${plates ? `
+      uniform highp sampler2DArray uPlateArt;
+      uniform float uPlateArtCount;  // 0: the plates share the card's artwork
+      uniform vec2 uPlateTexel;
+      flat varying float vPlate;
+      vec4 cardArt(vec2 uv) {
+        return uPlateArtCount > 0.5 ? texture(uPlateArt, vec3(uv, mod(vPlate, uPlateArtCount))) : texture2D(map, uv);
+      }
+      vec2 cardTexel() { return uPlateArtCount > 0.5 ? uPlateTexel : uMapTexel; }
+      ` : `
+      vec4 cardArt(vec2 uv) { return texture2D(map, uv); }
+      vec2 cardTexel() { return uMapTexel; }
+      `}
+
+      // how much of the artwork's dark linework is under uv
+      float cardInkAt(vec2 uv) {
+        float lum = dot(cardArt(uv).rgb, vec3(0.299, 0.587, 0.114));
+        return 1.0 - smoothstep(0.12, 0.4, lum);
+      }
+
+      // tilt the normal by a height gradient measured across the artwork
+      // (per uv), not across screen pixels — smooth, so fine lines don't
+      // bead. The face is flat, so this tangent frame is exact.
+      vec3 cardEtchPerturb(vec3 surfPos, vec3 surfNorm, vec2 uv, vec2 dHduv) {
+        vec3 q0 = dFdx(surfPos), q1 = dFdy(surfPos);
+        vec2 st0 = dFdx(uv), st1 = dFdy(uv);
+        vec3 q1perp = cross(q1, surfNorm), q0perp = cross(surfNorm, q0);
+        vec3 T = q1perp * st0.x + q0perp * st1.x;
+        vec3 B = q1perp * st0.y + q0perp * st1.y;
+        float det = max(dot(T, T), dot(B, B));
+        float scale = det == 0.0 ? 0.0 : inversesqrt(det);
+        return normalize(surfNorm - (dHduv.x * T + dHduv.y * B) * scale);
+      }
+    `)
+      .replace('#include <map_fragment>', /* glsl */ `diffuseColor *= cardArt(vMapUv);
+        float cardSticker = 0.0;
+        float cardInk = 0.0;    // the artwork's linework
+        float cardEtchH = 0.0;  // groove depth, 0..1
+        vec2 cardEtchGrad = vec2(0.0);  // its slope across the artwork
+        bool cardEtched = uEtchMode > 0.5;
+        bool cardBare = cardEtched && uEtchMode < 1.5;
+        {
+          cardInk = cardInkAt(vMapUv);
+          if (cardEtched) {
+            // the groove's walls are as wide as the bevel: its slope is the
+            // change in ink across that width
+            vec2 o = cardTexel() * uEtchBevel;
+            float l = cardInkAt(vMapUv - vec2(o.x, 0.0)), r = cardInkAt(vMapUv + vec2(o.x, 0.0));
+            float d = cardInkAt(vMapUv - vec2(0.0, o.y)), u = cardInkAt(vMapUv + vec2(0.0, o.y));
+            cardEtchH = max(cardInk, 0.25 * (l + r + d + u));
+            cardEtchGrad = vec2(r - l, u - d) * 0.5;
+          }
+          // etched bare: the groove shows the plate itself, a cool silver,
+          // shadowed inside the cut so each line reads as one line
+          if (cardBare) {
+            float shade = 1.0 - 0.55 * cardEtchH * clamp(uEtchDepth * 1.5, 0.0, 1.0);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.55, 0.56, 0.6) * shade, cardInk);
+          }
+          // stickers sit on top of everything
+          vec4 stk = texture2D(uStickerMap, vMapUv);
+          cardSticker = stk.a;
+          diffuseColor.rgb = mix(diffuseColor.rgb, stk.rgb, stk.a);
+        }`)
+      // printed or filled ink is matte paint; a bare etched groove is frosted metal
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor = cardBare
+          ? mix(mix(roughnessFactor, 0.5, cardInk), 0.55, cardSticker * 0.5)
+          : mix(roughnessFactor, 0.55, max(cardInk, cardSticker * 0.5));`)
+      .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
+        metalnessFactor = mix(metalnessFactor, 0.0, cardBare ? cardSticker : max(cardInk, cardSticker));`)
+      // the groove: its shoulders bend the light, so the cut catches it as the card turns
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+        if (cardEtched && uEtchDepth > 0.0) {
+          // a cut: height falls into the ink, so the slope points out of it
+          vec2 dHduv = -cardEtchGrad * uEtchDepth * 0.08 * (1.0 - cardSticker);
+          normal = cardEtchPerturb(-vViewPosition, normal, vMapUv, dHduv / cardTexel());
+        }`)
+      .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>
+        #ifdef USE_IRIDESCENCE
+          material.iridescence *= 1.0 - max(cardInk, cardSticker);
+        #endif`);
+  }
+
   /** The surface textures are recreated when the artwork's shape changes. */
   setTextures(surface: THREE.Texture, stickers: THREE.Texture) {
     this.front.map = surface;
+    this.plateFront.map = surface;
     this.stickerMap.value = stickers;
     const img = surface.image as { width?: number; height?: number } | undefined;
     if (img?.width && img.height) this.etch.uMapTexel.value.set(1 / img.width, 1 / img.height);
+  }
+
+  /**
+   * A different artwork for each plate of the stack — the layers of a
+   * texture array, cycled through the plates — or null to give them all the
+   * card's. The caller owns the texture.
+   */
+  setPlateArt(art: THREE.DataArrayTexture | null) {
+    this.plateArt.uPlateArt.value = art;
+    this.plateArt.uPlateArtCount.value = art ? art.image.depth : 0;
+    if (art) this.plateArt.uPlateTexel.value.set(1 / art.image.width, 1 / art.image.height);
   }
 
   /**
@@ -386,7 +437,7 @@ export class MetalCard {
    * card has the same texture. The back and edges take a lighter dose.
    */
   setDetail(normalMap: THREE.Texture | null, roughnessMap: THREE.Texture | null) {
-    for (const m of [this.front, this.metal, this.edge]) {
+    for (const m of [this.front, this.plateFront, this.metal, this.edge]) {
       const changed = !!m.normalMap !== !!normalMap || !!m.roughnessMap !== !!roughnessMap;
       m.normalMap = normalMap;
       m.roughnessMap = roughnessMap;
@@ -395,9 +446,30 @@ export class MetalCard {
     }
   }
 
+  /**
+   * The back: brushed (satin, grain along the card) or a mirror polish that
+   * reflects the room, its scratches nearly polished out.
+   */
+  setBack(finish: string) {
+    const mirror = finish === 'Mirror';
+    if (mirror === this.backMirror) return;
+    this.backMirror = mirror;
+    const m = this.metal;
+    m.color.set(mirror ? '#d9dde3' : '#c3c8cf');
+    m.roughness = mirror ? 0.03 : 0.38;
+    m.anisotropy = mirror ? 0 : 0.8;
+    m.clearcoat = mirror ? 1 : 0.3;
+    m.clearcoatRoughness = mirror ? 0.02 : 0.3;
+    this.setBump(this.bump);
+  }
+
   setBump(strength: number) {
+    this.bump = strength;
     this.front.normalScale.set(strength, strength);
-    this.metal.normalScale.set(strength * 0.5, strength * 0.5);
+    this.plateFront.normalScale.set(strength, strength);
+    // the back takes a lighter dose; polished, hardly any
+    const back = strength * (this.backMirror ? 0.1 : 0.5);
+    this.metal.normalScale.set(back, back);
     // the edges carry the full scratches, like the face
     this.edge.normalScale.set(strength, strength);
   }

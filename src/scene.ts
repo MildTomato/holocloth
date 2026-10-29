@@ -45,6 +45,8 @@ export interface HoloParams {
     etchDepth: number;
     etchBevel: number;
     corner: number;
+    /** the back: Mirror or Brushed */
+    back?: string;
     /** roughly how long each cinematic shot holds (s), and how dramatic its light is */
     shotLength: number;
     drama: number;
@@ -148,6 +150,12 @@ const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
 };
 
 /** the Flower artwork's photos: each a single stem on solid black */
+/**
+ * The stack's own artworks: how many (cycled through the plates) and their
+ * size — the page at about half its size, plenty for a plate in a formation.
+ */
+const PLATE_ART = { count: 8, w: 1000, h: 1500 };
+
 const flowerSrc = (name: string) =>
   `/artwork/flowers/${name.toLowerCase()}.jpg`;
 
@@ -315,6 +323,10 @@ export class HoloApp {
   private gridJob = 0;
   private gridTimer: number | null = null;
   private gridField: Promise<string> | null = null;
+  /** the stack's per-plate Engine artworks: what they were drawn from, the job drawing them, and the texture */
+  private plateArtKey = '';
+  private plateArtJob = 0;
+  private plateArt: THREE.DataArrayTexture | null = null;
   /** a photo uploaded for the Flower artwork, in place of the chosen flower; and a count that changes with it */
   private flowerUpload: string | null = null;
   private flowerVersion = 0;
@@ -487,8 +499,10 @@ export class HoloApp {
     if (p.card) {
       this.card.setEtch(p.card.ink, p.card.etchDepth, p.card.etchBevel);
       this.card.setCorner(p.card.corner);
+      this.card.setBack(p.card.back ?? 'Mirror');
     }
     if (p.stack) this.card.setStack({ ...p.stack, cards: p.cards });
+    this.updatePlateArt(p);
     this.drama = p.card?.drama ?? 0.7;
     this.setCinematic(!!p.cinematic, p.card?.shotLength ?? 2.2);
     this.faceCollider.depth = p.physics.faceDepth;
@@ -587,6 +601,68 @@ export class HoloApp {
         this.swapClothArt(img);
       }).catch((err) => console.error('[holocloth] grid art failed', err));
     }, 90);
+  }
+
+  /**
+   * In a stack with Engine artwork, each plate gets its own: a few
+   * compositions from neighbouring seeds (the first is the card's own),
+   * cycled through the plates. Anything else and the plates share the card's.
+   */
+  private updatePlateArt(p: HoloParams) {
+    const g = p.grid;
+    const on = p.cards === 'Stack' && g?.pattern === 'Engine';
+    const key = on ? ['Plates', g.engine, g.seed, g.layers].join('|') : '';
+    if (key === this.plateArtKey) return;
+    this.plateArtKey = key;
+    const job = ++this.plateArtJob;
+    if (!on) {
+      this.card.setPlateArt(null);
+      this.plateArt?.dispose();
+      this.plateArt = null;
+      return;
+    }
+    this.drawPlateArt(g, job).then((art) => {
+      if (job !== this.plateArtJob || this.disposed) {
+        art?.dispose();
+        return;
+      }
+      this.card.setPlateArt(art);
+      this.plateArt?.dispose();
+      this.plateArt = art;
+    }).catch((err) => console.error('[holocloth] plate art failed', err));
+  }
+
+  private async drawPlateArt(g: HoloParams['grid'], job: number) {
+    const field = await (this.gridField ??= fetchDataUrl('/artwork/field.png'));
+    const box = { x: ASCII.x0, y: ASCII.y0, w: ASCII.x1 - ASCII.x0, h: ASCII.y1 - ASCII.y0 };
+    const canvas = document.createElement('canvas');
+    canvas.width = PLATE_ART.w;
+    canvas.height = PLATE_ART.h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    const layer = PLATE_ART.w * PLATE_ART.h * 4;
+    const data = new Uint8Array(layer * PLATE_ART.count);
+    for (let i = 0; i < PLATE_ART.count; i++) {
+      if (job !== this.plateArtJob) return null; // superseded: stop drawing
+      // neighbouring seeds, so the stack belongs to the card's seed
+      const seed = ((Math.round(g.seed) - 1 + i * 97) % 999) + 1;
+      const linework = await engineLinework(g.engine ?? 'Random', seed, box, Math.round(g.layers ?? 3));
+      const img = await loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pageWith(linework, field))}`);
+      ctx.drawImage(img, 0, 0, PLATE_ART.w, PLATE_ART.h);
+      const px = ctx.getImageData(0, 0, PLATE_ART.w, PLATE_ART.h).data;
+      // rows bottom-up: texture arrays can't be flipped on upload
+      const row = PLATE_ART.w * 4;
+      for (let y = 0; y < PLATE_ART.h; y++) {
+        data.set(px.subarray(y * row, (y + 1) * row), i * layer + (PLATE_ART.h - 1 - y) * row);
+      }
+    }
+    const art = new THREE.DataArrayTexture(data, PLATE_ART.w, PLATE_ART.h, PLATE_ART.count);
+    art.colorSpace = THREE.SRGBColorSpace;
+    art.minFilter = THREE.LinearMipmapLinearFilter;
+    art.magFilter = THREE.LinearFilter;
+    art.generateMipmaps = true;
+    art.anisotropy = 8;
+    art.needsUpdate = true;
+    return art;
   }
 
   private async generateGridArt(g: HoloParams['grid']) {
@@ -1659,6 +1735,7 @@ export class HoloApp {
 
   dispose() {
     this.disposed = true;
+    this.plateArt?.dispose();
     this.faceTracker?.stop();
     this.handTracker?.stop();
     this.renderer.setAnimationLoop(null);
