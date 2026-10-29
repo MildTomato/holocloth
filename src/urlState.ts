@@ -7,6 +7,23 @@
  */
 
 type Primitive = string | number | boolean;
+
+/**
+ * Controls are told from folders by their kind: a string `type` naming one.
+ * Testing for a `type` key alone isn't enough — a folder may hold a control
+ * *named* type (Grid's glyph size).
+ */
+const CONTROL_KINDS = new Set(['select', 'color', 'text', 'action', 'spring', 'easing']);
+const kindOf = (v: unknown) => {
+  const t = v && typeof v === 'object' ? (v as { type?: unknown }).type : undefined;
+  return typeof t === 'string' ? t : undefined;
+};
+/** a folder in the panel config */
+const isConfigFolder = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v) && !CONTROL_KINDS.has(kindOf(v) ?? '');
+/** a folder in the resolved values (a transition's value is an object too, but not a folder) */
+const isValueFolder = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v) && kindOf(v) !== 'spring' && kindOf(v) !== 'easing';
 type Flat = Record<string, Primitive>;
 
 /** per-device or per-session settings, never put in a link */
@@ -39,8 +56,8 @@ export function flattenValues(values: Record<string, unknown>, prefix = ''): Fla
   for (const [key, v] of Object.entries(values)) {
     const path = prefix ? `${prefix}.${key}` : key;
     if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') out[path] = v;
-    else if (v && typeof v === 'object' && !('type' in v)) {
-      Object.assign(out, flattenValues(v as Record<string, unknown>, path));
+    else if (isValueFolder(v)) {
+      Object.assign(out, flattenValues(v, path));
     }
   }
   return out;
@@ -83,8 +100,8 @@ export function withUrlDefaults<T extends Record<string, unknown>>(
       const path = prefix ? `${prefix}.${key}` : key;
       const o = overrides[path];
       if (o === undefined) {
-        out[key] = v && typeof v === 'object' && !Array.isArray(v) && !('type' in v)
-          ? apply(v as Record<string, unknown>, path)
+        out[key] = isConfigFolder(v)
+          ? apply(v, path)
           : v;
       } else if (Array.isArray(v)) {
         out[key] = [o, ...v.slice(1)];
