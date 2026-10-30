@@ -402,13 +402,13 @@ const BASE_PANEL = {
   theme: {
     type: 'select' as const,
     options: ['Dark', 'Light'],
-    default: 'Dark',
+    default: 'Light',
   },
   /** the lights: Studio is the original; the others are other rooms and rigs to try */
   lighting: {
     type: 'select' as const,
     options: [...LIGHTING],
-    default: 'Studio',
+    default: 'Supabase',
   },
   /** Card mode: dragging the card spins it (and it settles back), or moves the camera, which stays put */
   drag: {
@@ -420,14 +420,14 @@ const BASE_PANEL = {
   cards: {
     type: 'select' as const,
     options: ['One', 'Stack'],
-    default: 'One',
+    default: 'Stack',
   },
   stack: {
     shape: {
       type: 'select' as const,
       options: STACK_OPTIONS.filter((o) => o !== 'Single'),
-      // a stack is always on the move: through every formation in turn
-      default: 'Cycle',
+      // the stack opens as a spiral; Cycle moves through every formation in turn
+      default: 'Helix',
     },
     count: [32, 2, MAX_PLATES, 1],
     twist: [0.5, 0, 1, 0.01],
@@ -491,7 +491,7 @@ const BASE_PANEL = {
       type: 'select' as const,
       // Engine only where the Visual Engine submodule is checked out
       options: ['Original', 'Generated', 'Growth', 'Bars', 'Flower', ...(ENGINE_AVAILABLE ? ['Engine'] : [])],
-      default: 'Growth',
+      default: ENGINE_AVAILABLE ? 'Engine' : 'Growth',
     },
     /** Engine: which Visual Engine system draws the artwork (Seed varies it) */
     engine: {
@@ -568,9 +568,10 @@ const BASE_PANEL = {
   },
   render: {
     _collapsed: true,
-    background: { type: 'color' as const, default: RENDER_DEFAULTS.background },
-    exposure: [RENDER_DEFAULTS.exposure, 0.2, 2.5, 0.01],
-    environment: [RENDER_DEFAULTS.environment, 0, 3, 0.01],
+    // the room starts Light, so the sliders start from its values
+    background: { type: 'color' as const, default: THEME_VALUES.Light.background },
+    exposure: [THEME_VALUES.Light.exposure, 0.2, 2.5, 0.01],
+    environment: [THEME_VALUES.Light.environment, 0, 3, 0.01],
     /** turns the lighting round the card, sliding its reflections across the metal */
     lightAngle: [0, -180, 180, 1],
     bloom: [RENDER_DEFAULTS.bloom, 0, 1.2, 0.01],
