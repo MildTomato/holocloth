@@ -13,6 +13,7 @@ import { normalMapFromImage } from './textures.ts';
 import { MacroDofPass } from './dofPass.ts';
 import { BAKED_POSE } from './bakedPose.ts';
 import { engineLinework } from './engineArt.ts';
+import { plateArtKey, loadPlateArt, savePlateArt } from './plateArtCache.ts';
 import { gridSvg, growthSvg, barsSvg, asciiSvg, asciiGrid, ditherSvg, ditherGrid, pageWith, ASCII, sampleLuminance, loadImage, fetchDataUrl } from './gridArt.ts';
 import { FaceTracker } from './faceTracker.ts';
 import { MetalCard } from './card.ts';
@@ -717,19 +718,39 @@ export class HoloApp {
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     const layer = PLATE_ART.w * PLATE_ART.h * 4;
     const data = new Uint8Array(layer * PLATE_ART.count);
+    const engine = g.engine ?? 'Random';
+    const layers = Math.round(g.layers ?? 3);
+    // drawn before (anywhere)? then just download it
+    const key = plateArtKey(engine, Math.round(g.seed), layers);
+    const cached = key ? await loadPlateArt(key, PLATE_ART.count) : null;
+    if (job !== this.plateArtJob) return null;
+    const fresh: Promise<Blob | null>[] = [];
     for (let i = 0; i < PLATE_ART.count; i++) {
       if (job !== this.plateArtJob) return null; // superseded: stop drawing
-      // neighbouring seeds, so the stack belongs to the card's seed
-      const seed = ((Math.round(g.seed) - 1 + i * 97) % 999) + 1;
-      const linework = await engineLinework(g.engine ?? 'Random', seed, box, Math.round(g.layers ?? 3));
-      const img = await loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pageWith(linework, field))}`);
-      ctx.drawImage(img, 0, 0, PLATE_ART.w, PLATE_ART.h);
+      if (cached) {
+        ctx.clearRect(0, 0, PLATE_ART.w, PLATE_ART.h);
+        ctx.drawImage(cached[i], 0, 0, PLATE_ART.w, PLATE_ART.h);
+        cached[i].close();
+      } else {
+        // neighbouring seeds, so the stack belongs to the card's seed
+        const seed = ((Math.round(g.seed) - 1 + i * 97) % 999) + 1;
+        const linework = await engineLinework(engine, seed, box, layers);
+        const img = await loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pageWith(linework, field))}`);
+        ctx.drawImage(img, 0, 0, PLATE_ART.w, PLATE_ART.h);
+        if (key) fresh.push(new Promise((done) => canvas.toBlob(done, 'image/webp', 0.92)));
+      }
       const px = ctx.getImageData(0, 0, PLATE_ART.w, PLATE_ART.h).data;
       // rows bottom-up: texture arrays can't be flipped on upload
       const row = PLATE_ART.w * 4;
       for (let y = 0; y < PLATE_ART.h; y++) {
         data.set(px.subarray(y * row, (y + 1) * row), i * layer + (PLATE_ART.h - 1 - y) * row);
       }
+    }
+    // first to draw this set: keep it for everyone after
+    if (key && !cached) {
+      Promise.all(fresh).then((blobs) => {
+        if (blobs.every((b): b is Blob => b !== null)) savePlateArt(key, blobs, PLATE_ART.w, PLATE_ART.h);
+      });
     }
     const art = new THREE.DataArrayTexture(data, PLATE_ART.w, PLATE_ART.h, PLATE_ART.count);
     art.colorSpace = THREE.SRGBColorSpace;
