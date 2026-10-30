@@ -147,6 +147,8 @@ export interface HoloParams {
   };
 }
 
+/** how far right the baked view aimed to leave room for the panel */
+const BAKED_PANEL_SHIFT = 0.525;
 const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
   AgX: THREE.AgXToneMapping,
   ACES: THREE.ACESFilmicToneMapping,
@@ -260,6 +262,9 @@ export class HoloApp {
   private clothMesh: THREE.Mesh;
   private card: MetalCard;
   private cardMode = false;
+  /** px of the canvas's right edge the panel covers; the view centres in the rest */
+  private viewInset = 0;
+  private panelCheck = 0;
   private revealed = false;
   private cardDragId: number | null = null;
   private cardLast = { x: 0, y: 0, t: 0 };
@@ -440,7 +445,11 @@ export class HoloApp {
     this.controls.dampingFactor = 0.08;
     this.controls.minDistance = 1.6;
     this.controls.maxDistance = 30;
-    this.controls.target.set(...BAKED_POSE.target);
+    // the baked view sat the subject left of centre to clear the panel; the
+    // view offset does that now (and only while the panel is out), so aim
+    // the camera at the subject itself
+    this.controls.target.set(...BAKED_POSE.target).x -= BAKED_PANEL_SHIFT;
+    this.camera.position.x -= BAKED_PANEL_SHIFT;
     // a link can carry a view: ?cam=x,y,z&target=x,y,z
     const view = readCameraUrl();
     if (view) {
@@ -1779,15 +1788,43 @@ export class HoloApp {
     const height = this.host.clientHeight || window.innerHeight;
     if (width === 0 || height === 0) return;
     this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
+    this.applyViewInset(width, height);
     this.renderer.setSize(width, height);
     this.composer.setSize(width, height);
+  }
+
+  /**
+   * Centre the view in the space the panel leaves: shift the projection by
+   * half the panel's overlap, so the camera's aim lands mid-way across the
+   * open canvas. Hidden or collapsed, the panel takes no room.
+   */
+  private applyViewInset(width = this.host.clientWidth, height = this.host.clientHeight) {
+    if (this.viewInset > 0) this.camera.setViewOffset(width, height, this.viewInset / 2, 0, width, height);
+    else this.camera.clearViewOffset();
+    this.camera.updateProjectionMatrix();
+  }
+
+  private measurePanel() {
+    const panel = document.querySelector('.dialkit-panel');
+    const host = this.host.getBoundingClientRect();
+    const rect = panel?.getBoundingClientRect();
+    // a collapsed panel is a small pill in the corner: it doesn't count
+    const open = rect && rect.height > host.height * 0.5;
+    const inset = open ? Math.max(0, Math.round(host.right - rect.left)) : 0;
+    if (inset === this.viewInset) return;
+    this.viewInset = inset;
+    this.applyViewInset();
   }
 
   private tick = () => {
     if (this.disposed) return;
     const dt = this.clock.getDelta();
     this.elapsed += dt;
+    this.panelCheck -= dt;
+    if (this.panelCheck <= 0) {
+      this.panelCheck = 0.25;
+      this.measurePanel();
+    }
     this.grainPass.uniforms.uTime.value = this.elapsed % 61.7;
 
     if (this.slaps.length > 0) {

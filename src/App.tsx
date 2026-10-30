@@ -432,7 +432,7 @@ const BASE_PANEL = {
     count: [32, 2, MAX_PLATES, 1],
     twist: [0.5, 0, 1, 0.01],
     spacing: [1.5, 0.3, 6, 0.1],
-    flow: [1, 0, 3, 0.01],
+    flow: [0.36, 0, 3, 0.01],
   },
   hands: false,
   cinematic: false,

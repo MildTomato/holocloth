@@ -366,8 +366,10 @@ export class StackAnimator {
     return this.shape === 'Single' && this.move >= 1;
   }
 
-  /** Head for a formation (or Cycle). */
+  /** Head for a formation (or Cycle). The first one is simply there: no move in at startup. */
   setTarget(option: string) {
+    const first = !this.started;
+    this.started = true;
     const cycling = option === 'Cycle';
     if (cycling) {
       if (this.cycling) return;
@@ -378,16 +380,17 @@ export class StackAnimator {
     }
     this.cycling = false;
     const shape = (STACK_SHAPES as readonly string[]).includes(option) ? (option as StackShape) : 'Single';
-    this.goTo(shape);
+    this.goTo(shape, first);
   }
 
   private cycling = false;
+  private started = false;
 
-  private goTo(shape: StackShape) {
+  private goTo(shape: StackShape, snap = false) {
     if (shape === this.shape) return;
-    this.from = this.shape;
+    this.from = snap ? shape : this.shape;
     this.shape = shape;
-    this.move = 0;
+    this.move = snap ? 1 : 0;
   }
 
   private spreadFor(shape: StackShape, n: number, w: number, h: number, t: number, params: StackParams) {
