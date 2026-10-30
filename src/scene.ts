@@ -169,6 +169,11 @@ const PLATE_LEAN_RATE = 6;
 /** how far (px) the pointer can stray from a hovered plate before it settles back */
 const HOVER_HOLD_PX = 40;
 
+/** out of focus, a frame every this many ms: 30 a second */
+const BLURRED_FRAME_MS = 1000 / 30;
+/** the longest step a frame takes (s), however long it was since the last */
+const MAX_DT = 0.1;
+
 /** A view from the link (?cam=x,y,z&target=x,y,z), if it has a whole one. */
 function readCameraUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -324,6 +329,12 @@ export class HoloApp {
   private background = new THREE.Color('#0b0c12');
   private clock = new THREE.Clock();
   private elapsed = 0;
+  /** the window has focus; without it the loop runs cheaper (fewer frames, no hover) */
+  private focused = document.hasFocus();
+  /** the out-of-focus loop: a timer, so the page isn't woken every display frame */
+  private slowLoop: number | null = null;
+  /** the pointer is over the canvas: only then is there anything to hover */
+  private pointerOver = false;
   private raycaster = new THREE.Raycaster();
   private pointerNdc = new THREE.Vector2();
   private dragPlane = new THREE.Plane();
@@ -439,6 +450,8 @@ export class HoloApp {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onWindowBlur);
+    window.addEventListener('focus', this.onWindowFocus);
+    document.addEventListener('visibilitychange', this.onVisibility);
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
@@ -488,7 +501,7 @@ export class HoloApp {
     this.resizeObserver = new ResizeObserver(() => this.onResize());
     this.resizeObserver.observe(host);
 
-    this.renderer.setAnimationLoop(this.tick);
+    this.runLoop();
 
     if (import.meta.env.DEV) {
       (window as unknown as Record<string, unknown>).__holo = this;
@@ -1587,9 +1600,41 @@ export class HoloApp {
     // cmd-tab away mid-hold: never leave pan mode stuck on
     this.spaceHeld = false;
     this.controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+    // out of focus: no hover, and a lower frame rate
+    this.focused = false;
+    this.hovered = null;
+    this.card.hoverPlate(null);
+    this.runLoop();
   };
 
+  private onWindowFocus = () => {
+    this.focused = true;
+    this.runLoop();
+  };
+
+  private onVisibility = () => {
+    // restart the clock on return, so the time away never reaches the sim as one big step
+    if (document.hidden) this.clock.stop();
+    else this.clock.start();
+    this.runLoop();
+  };
+
+  /**
+   * Run the loop to suit the page: every display frame in focus, 30 a
+   * second out of it (still moving, just cheaper), and not at all while the
+   * tab is hidden.
+   */
+  private runLoop() {
+    this.renderer.setAnimationLoop(null);
+    if (this.slowLoop !== null) window.clearInterval(this.slowLoop);
+    this.slowLoop = null;
+    if (this.disposed || document.hidden) return;
+    if (this.focused) this.renderer.setAnimationLoop(this.tick);
+    else this.slowLoop = window.setInterval(this.tick, BLURRED_FRAME_MS);
+  }
+
   private onPointerDown = (e: PointerEvent) => {
+    this.pointerOver = true;
     if (e.button !== 0 || this.grabbing || this.draggingDecal) return;
     this.updatePointer(e);
     if (this.pickingFocus) {
@@ -1680,6 +1725,7 @@ export class HoloApp {
   };
 
   private onPointerMove = (e: PointerEvent) => {
+    this.pointerOver = true;
     if (this.cardDragId !== null) {
       if (e.pointerId !== this.cardDragId) return;
       const now = performance.now();
@@ -1711,6 +1757,7 @@ export class HoloApp {
 
   /** off the canvas: nothing is hovered */
   private onPointerLeave = () => {
+    this.pointerOver = false;
     this.hovered = null;
     this.card.hoverPlate(null);
   };
@@ -1722,7 +1769,7 @@ export class HoloApp {
    * touched this one.
    */
   private stickyHover(under: number | null) {
-    const px = this.pointerNdc.clone();
+    const px = this.pointerNdc;
     if (under !== null) {
       this.hovered = under;
       this.hoverAt.copy(px);
@@ -1818,7 +1865,8 @@ export class HoloApp {
 
   private tick = () => {
     if (this.disposed) return;
-    const dt = this.clock.getDelta();
+    // a stalled frame (a long task, a throttled window) is taken as a short one, not a leap
+    const dt = Math.min(this.clock.getDelta(), MAX_DT);
     this.elapsed += dt;
     this.panelCheck -= dt;
     if (this.panelCheck <= 0) {
@@ -1873,9 +1921,10 @@ export class HoloApp {
       this.dofPass.setFocus(focusDist);
     }
 
-    // hover cursor feedback (skip while dragging/picking/panning; off on Low)
+    // hover cursor feedback (skip while dragging/picking/panning, with the
+    // pointer off the canvas or the window out of focus; off on Low)
     if (!this.grabbing && !this.draggingDecal && !this.pickingFocus && !this.spaceHeld &&
-        this.perfProfile !== 'Low') {
+        this.pointerOver && this.focused && this.perfProfile !== 'Low') {
       const hit = this.cardMode ? this.raycastCard() : this.raycastCloth();
       // a plate of the stack under the pointer pops out a little, and can be clicked
       // (the pulled-out plate is already as far out as it goes)
@@ -1908,7 +1957,7 @@ export class HoloApp {
     this.lighting.dispose();
     this.faceTracker?.stop();
     this.handTracker?.stop();
-    this.renderer.setAnimationLoop(null);
+    this.runLoop(); // disposed: stops it
     this.resizeObserver.disconnect();
     const canvas = this.renderer.domElement;
     canvas.removeEventListener('pointerdown', this.onPointerDown);
@@ -1920,6 +1969,8 @@ export class HoloApp {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onWindowBlur);
+    window.removeEventListener('focus', this.onWindowFocus);
+    document.removeEventListener('visibilitychange', this.onVisibility);
     this.controls.dispose();
     this.dofPass.dispose();
     this.composer.dispose();

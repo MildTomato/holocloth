@@ -38,6 +38,8 @@ const s = new THREE.Vector3();
 const p = new THREE.Vector3();
 const e = new THREE.Euler();
 const basis = new THREE.Matrix4();
+// scratch for the per-frame paths, so moving the plates allocates nothing
+const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3(), v4 = new THREE.Vector3();
 
 /**
  * Plate i of n's transform, card centred at the origin facing +z.
@@ -80,7 +82,7 @@ export function plateMatrix(
       q.setFromAxisAngle(Z, -a);
       // rotate about the corner: corner -> origin, turn, back
       const cx = -w / 2, cy = -h / 2;
-      p.set(-cx, -cy, 0).applyQuaternion(q).add(new THREE.Vector3(cx, cy, -i * gap));
+      p.set(-cx, -cy, 0).applyQuaternion(q).add(v1.set(cx, cy, -i * gap));
       s.setScalar(1);
       return out.compose(p, q, s);
     }
@@ -104,8 +106,7 @@ export function plateMatrix(
       const turn = twist * Math.PI * 2;
       q.setFromAxisAngle(Y, f * turn + phase * Math.PI * 2);
       // lying almost flat, stepping up
-      const lie = new THREE.Quaternion().setFromAxisAngle(X, -Math.PI / 2 + 0.35);
-      q.multiply(lie);
+      q.multiply(LIE);
       const rise = Math.max(gap * 2.2, (h * 1.2) / Math.max(1, n)) * spread;
       p.set(0, (i - (n - 1) / 2) * rise, 0);
       s.setScalar(scale);
@@ -171,16 +172,18 @@ const TAU = Math.PI * 2;
  * ring's axis, its face pointing the way round.
  */
 function ringSlat(phi: number, chi: number, R: number, q: THREE.Quaternion, p: THREE.Vector3) {
-  const radial = new THREE.Vector3(Math.cos(phi), Math.sin(phi), 0);
-  const long = radial.clone().multiplyScalar(Math.cos(chi)).addScaledVector(Z, Math.sin(chi));
-  const across = radial.clone().multiplyScalar(-Math.sin(chi)).addScaledVector(Z, Math.cos(chi));
-  basis.makeBasis(across, long, new THREE.Vector3().crossVectors(across, long));
+  const radial = v1.set(Math.cos(phi), Math.sin(phi), 0);
+  const long = v2.copy(radial).multiplyScalar(Math.cos(chi)).addScaledVector(Z, Math.sin(chi));
+  const across = v3.copy(radial).multiplyScalar(-Math.sin(chi)).addScaledVector(Z, Math.cos(chi));
+  basis.makeBasis(across, long, v4.crossVectors(across, long));
   q.setFromRotationMatrix(basis);
   p.copy(radial).multiplyScalar(R);
 }
 const X = new THREE.Vector3(1, 0, 0);
 const Y = new THREE.Vector3(0, 1, 0);
 const Z = new THREE.Vector3(0, 0, 1);
+/** a Helix plate lying almost flat */
+const LIE = new THREE.Quaternion().setFromAxisAngle(X, -Math.PI / 2 + 0.35);
 
 /** a pulled-out plate's spot, in the stack's space; pushed further out when the formation is deeper */
 export const FRONT = new THREE.Vector3(0, 0, 1.4);
@@ -198,6 +201,9 @@ const pa = new THREE.Vector3(), pb = new THREE.Vector3();
 const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
 const sa = new THREE.Vector3(), sb = new THREE.Vector3();
 const ma = new THREE.Matrix4(), mb = new THREE.Matrix4();
+const nrm = new THREE.Vector3(), away = new THREE.Vector3(), side = new THREE.Vector3();
+const toward = new THREE.Vector3(), sideFront = new THREE.Vector3(), lean = new THREE.Quaternion();
+const tiltEuler = new THREE.Euler();
 
 // ---- collisions --------------------------------------------------------
 
@@ -316,6 +322,8 @@ export class StackAnimator {
   /** the plate under the pointer, and how far each has popped out (0..1) */
   private hover: number | null = null;
   private lift = new Float32Array(MAX_PLATES);
+  /** each plate's place in the formation this frame, worked out once */
+  private places: THREE.Matrix4[] = [];
   /** each formation's clearing spread, for the settings it was worked out at */
   private spreads = new Map<string, number>();
   /** where a pulled-out plate is shown: clear in front of the formation */
@@ -332,7 +340,7 @@ export class StackAnimator {
 
   /** Lean the pulled-out plate: turn its face by (x, y) radians, right and up. */
   setTilt(x: number, y: number) {
-    this.tilt.setFromEuler(new THREE.Euler(-y, x, 0));
+    this.tilt.setFromEuler(tiltEuler.set(-y, x, 0));
   }
 
   /** Present a pulled-out plate at this pose and size (stack space) rather than the front; null for the front. */
@@ -432,8 +440,9 @@ export class StackAnimator {
     const plateR = Math.hypot(w, h) / 2;
     let reach = 0, deepest = -Infinity;
     for (let i = 0; i < n; i++) {
-      plateMatrix(this.shape, i, n, w, h, t, params, this.phase, spreadTo, mb);
-      pb.setFromMatrixPosition(mb);
+      const place = (this.places[i] ??= new THREE.Matrix4());
+      plateMatrix(this.shape, i, n, w, h, t, params, this.phase, spreadTo, place);
+      pb.setFromMatrixPosition(place);
       reach = Math.max(reach, pb.length());
       deepest = Math.max(deepest, pb.z);
     }
@@ -445,7 +454,7 @@ export class StackAnimator {
     // each plate's own move takes half the time, starting in turn
     const stagger = 0.5;
     for (let i = 0; i < n; i++) {
-      plateMatrix(this.shape, i, n, w, h, t, params, this.phase, spreadTo, mb);
+      mb.copy(this.places[i]);
       if (this.move < 1) {
         const start = n > 1 ? (i / (n - 1)) * stagger : 0;
         const k = ease(THREE.MathUtils.clamp((this.move - start) / (1 - stagger), 0, 1));
@@ -487,8 +496,8 @@ export class StackAnimator {
    */
   private popOut(m: THREE.Matrix4, by: number) {
     m.decompose(pa, qa, sa);
-    const nrm = Z.clone().applyQuaternion(qa);
-    const away = pa.clone().addScaledVector(nrm, -pa.dot(nrm));
+    nrm.copy(Z).applyQuaternion(qa);
+    away.copy(pa).addScaledVector(nrm, -pa.dot(nrm));
     // a plate on the axis (a straight stack) pops toward the viewer instead
     if (away.lengthSq() < 1e-4) away.copy(nrm);
     pa.addScaledVector(away.normalize(), by);
@@ -505,24 +514,24 @@ export class StackAnimator {
   private pullOut(m: THREE.Matrix4, k: number, reach: number) {
     m.decompose(pa, qa, sa);
     // within the plate's plane, away from the formation's middle
-    const nrm = Z.clone().applyQuaternion(qa);
-    const away = pa.clone().addScaledVector(nrm, -pa.dot(nrm));
+    nrm.copy(Z).applyQuaternion(qa);
+    away.copy(pa).addScaledVector(nrm, -pa.dot(nrm));
     if (away.lengthSq() < 1e-4) away.copy(X).applyQuaternion(qa);
     away.normalize();
     // far enough that the plate, at any angle, can't reach the formation
-    const side = pa.clone().addScaledVector(away, reach + Math.hypot(sa.x, sa.y) + 0.2);
+    side.copy(pa).addScaledVector(away, reach + Math.hypot(sa.x, sa.y) + 0.2);
     // where it ends up, facing which way: the front, or presented to the viewer
     const dest = this.present?.position ?? this.front;
     const destQ = this.present?.quaternion ?? FACE_ON;
     // out toward the viewer (along the final facing) to the destination's depth, still clear to the side
-    const toward = Z.clone().applyQuaternion(destQ);
-    const sideFront = side.clone().addScaledVector(toward, Math.max(0, dest.clone().sub(side).dot(toward)));
+    toward.copy(Z).applyQuaternion(destQ);
+    sideFront.copy(side).addScaledVector(toward, Math.max(0, v1.subVectors(dest, side).dot(toward)));
     const seg = (a: number, b: number) => ease(THREE.MathUtils.clamp((k - a) / (b - a), 0, 1));
     const s1 = seg(0, 0.35), s2 = seg(0.35, 0.7), s3 = seg(0.7, 1);
     pb.copy(pa).lerp(side, s1).lerp(sideFront, s2).lerp(dest, s3);
     qb.copy(qa).slerp(destQ, s2);
     // once it's arrived, it leans (in its own axes, so it reads the same from any view)
-    if (s3 > 0) qb.multiply(new THREE.Quaternion().slerp(this.tilt, s3));
+    if (s3 > 0) qb.multiply(lean.identity().slerp(this.tilt, s3));
     sb.copy(sa).lerp(ONE, s2).multiplyScalar(THREE.MathUtils.lerp(1, this.present?.scale ?? 1, s3));
     m.compose(pb, qb, sb);
   }
