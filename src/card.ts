@@ -250,6 +250,11 @@ export class MetalCard {
     return this.stack.reach;
   }
 
+  /** Lean the pulled-out plate's face by (x, y) radians, toward the right and up. */
+  tiltPlate(x: number, y: number) {
+    this.stack.setTilt(x, y);
+  }
+
   /** The plate under the pointer (null: none) pops out a little. */
   hoverPlate(i: number | null) {
     this.stack.setHover(i);

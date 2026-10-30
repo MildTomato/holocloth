@@ -160,6 +160,10 @@ const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
  */
 const PLATE_ART = { count: 8, w: 1000, h: 1500 };
 
+/** how far a pulled-out plate leans toward a cursor at the edge of the view (radians), and how fast it follows */
+const PLATE_LEAN = THREE.MathUtils.degToRad(10);
+const PLATE_LEAN_RATE = 6;
+
 /** how far (px) the pointer can stray from a hovered plate before it settles back */
 const HOVER_HOLD_PX = 40;
 
@@ -295,6 +299,8 @@ export class HoloApp {
   private cineLight: THREE.RectAreaLight | null = null;
   private lighting: Lighting;
   private cameraUrlTimer: number | null = null;
+  /** the pulled-out plate's lean toward the cursor, now (radians) */
+  private plateLean = new THREE.Vector2();
   /** the plate held as hovered, and where the pointer last touched it (NDC) */
   private hovered: number | null = null;
   private hoverAt = new THREE.Vector2();
@@ -1203,6 +1209,12 @@ export class HoloApp {
 
   /** Ease the camera toward a pulled-out plate, or back to rest. */
   private updatePlateCamera(dt: number) {
+    // the pulled-out plate leans a little toward the cursor, easing there
+    const lean = this.card.focusedPlate !== null ? PLATE_LEAN : 0;
+    const ease = 1 - Math.exp(-PLATE_LEAN_RATE * dt);
+    this.plateLean.x += (this.pointerNdc.x * lean - this.plateLean.x) * ease;
+    this.plateLean.y += (this.pointerNdc.y * lean - this.plateLean.y) * ease;
+    this.card.tiltPlate(this.plateLean.x, this.plateLean.y);
     const c = this.plateCam;
     const focused = this.card.focusedPlate !== null;
     // anything that ends the stack, or the reel taking the camera, sends it back
@@ -1526,11 +1538,28 @@ export class HoloApp {
     this.focusVertex = null;
   }
 
-  /** Hold Space + left-drag = pan (design-tool style). */
+  /**
+   * Hold Space + left-drag = pan (design-tool style). With a plate pulled
+   * out, ← and → step to the previous and next plate (round the stack) and
+   * Escape puts it back.
+   */
   private onKeyDown = (e: KeyboardEvent) => {
-    if (e.code !== 'Space' || e.repeat) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    const focused = this.card.focusedPlate;
+    if (focused !== null && this.cardMode && this.card.stacked && !this.cine) {
+      const n = this.card.plateCount;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        this.focusPlate((focused + (e.key === 'ArrowRight' ? 1 : -1) + n) % n);
+        return;
+      }
+      if (e.key === 'Escape') {
+        this.focusPlate(null);
+        return;
+      }
+    }
+    if (e.code !== 'Space' || e.repeat) return;
     e.preventDefault();
     this.spaceHeld = true;
     this.controls.mouseButtons.LEFT = THREE.MOUSE.PAN;

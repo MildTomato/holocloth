@@ -327,6 +327,13 @@ export class StackAnimator {
   private present: { position: THREE.Vector3; quaternion: THREE.Quaternion; scale: number } | null = null;
   /** how far the formation reaches from its middle, plates included (stack space) */
   reach = 0;
+  /** a lean on the pulled-out plate, in its own axes — toward the cursor */
+  private tilt = new THREE.Quaternion();
+
+  /** Lean the pulled-out plate: turn its face by (x, y) radians, right and up. */
+  setTilt(x: number, y: number) {
+    this.tilt.setFromEuler(new THREE.Euler(-y, x, 0));
+  }
 
   /** Present a pulled-out plate at this pose and size (stack space) rather than the front; null for the front. */
   presentAt(position: THREE.Vector3 | null, quaternion?: THREE.Quaternion, scale = 1) {
@@ -511,6 +518,8 @@ export class StackAnimator {
     const s1 = seg(0, 0.35), s2 = seg(0.35, 0.7), s3 = seg(0.7, 1);
     pb.copy(pa).lerp(side, s1).lerp(sideFront, s2).lerp(dest, s3);
     qb.copy(qa).slerp(destQ, s2);
+    // once it's arrived, it leans (in its own axes, so it reads the same from any view)
+    if (s3 > 0) qb.multiply(new THREE.Quaternion().slerp(this.tilt, s3));
     sb.copy(sa).lerp(ONE, s2).multiplyScalar(THREE.MathUtils.lerp(1, this.present?.scale ?? 1, s3));
     m.compose(pb, qb, sb);
   }
